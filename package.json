@@ -1,0 +1,16 @@
+{
+  "name": "generatore-orario-turni",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Generatore Orario Turni Operai - static web application",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "build": "node --check server.js && node --check Orari/src/scheduler.js && node --check Orari/src/xlsx.js && node --check Orari/src/messaging.js && node --check Orari/src/app.js",
+    "lint": "node --check server.js && node --check Orari/src/scheduler.js && node --check Orari/src/xlsx.js && node --check Orari/src/messaging.js && node --check Orari/src/app.js",
+    "test": "node --test Orari/tests/scheduler.test.mjs"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

@@ -1579,6 +1579,155 @@ body.mode-mobile .toast {
   display: none !important;
 }
 
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Holiday & Unavailability Mini Day Grid */
+.mini-day-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.mini-day-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  line-height: 1.15;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.mini-day-btn small {
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.mini-day-btn:hover:not(:disabled) {
+  border-color: var(--primary);
+  background: #eff6ff;
+}
+
+.mini-day-btn.is-sun,
+.mini-day-btn.is-holiday {
+  background: var(--sun-bg);
+  border-color: #fecaca;
+  color: var(--sun-text);
+}
+
+.mini-day-btn.is-sun small,
+.mini-day-btn.is-holiday small {
+  color: var(--sun-text);
+}
+
+.mini-day-btn.is-sat:not(.is-holiday) {
+  background: var(--sat-bg);
+  border-color: var(--sat-border);
+}
+
+.mini-day-btn.is-unavail {
+  background: #fff7ed;
+  border-color: #fb923c;
+  color: #9a3412;
+  outline: 2px solid #fdba74;
+  outline-offset: -1px;
+}
+
+.mini-day-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.unavail-summary-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.unavail-summary-chip {
+  font-size: 11.5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--warn-text);
+  font-weight: 600;
+}
+
+.day-holiday-toggle {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 1px 4px;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.55;
+  margin-left: auto;
+}
+
+.day-holiday-toggle:hover {
+  opacity: 1;
+  background: var(--surface-alt);
+  border-color: var(--border-strong);
+}
+
+.holiday-reopen-btn {
+  margin-left: 10px;
+}
+
+/* Confirmation Modal */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 420px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.22);
+}
+
+.modal-card h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.modal-card p {
+  margin: 0 0 16px;
+  font-size: 13.5px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .toast {
   position: fixed;
   bottom: 20px;
@@ -1618,6 +1767,8 @@ body.mode-mobile .toast {
   .worker-print-options,
   .print-controls-card > .divider,
   .preview-label,
+  .modal-backdrop,
+  .day-holiday-toggle,
   .toast {
     display: none !important;
   }

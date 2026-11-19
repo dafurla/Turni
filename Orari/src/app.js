@@ -9,6 +9,7 @@
   const STORAGE_KEY_V3 = 'orari_turni_state_v3';
 
   const YEAR_RANGE = [2024, 2025, 2026, 2027, 2028, 2029, 2030, 2031, 2032];
+  const MAX_UNDO_STEPS = 15;
 
   const PALETTE = [
     { dot: '#2563eb', bg: '#eff6ff', border: '#bfdbfe' },
@@ -71,10 +72,12 @@
     schedulesByMonth: {},
     options: {
       avoidSameShiftConsecutive: true,
-      avoidLateToEarly: true
+      avoidLateToEarly: true,
+      useItalianHolidays: true
     },
     highlightedWorkerId: null,
     editingWorkerId: null,
+    unavailSelectedWorkerId: null,
     printMode: 'company', // 'company' | 'worker'
     printWorkerId: 'ALL',
     printIncludeAllDays: true,
@@ -82,19 +85,124 @@
     sendCustomMessageDirty: false
   };
 
-  function getCurrentMonthStore() {
-    const key = getMonthKey(state.year, state.month);
+  const undoStack = [];
+
+  function ensureStoreShape(store) {
+    if (!store.assignments || typeof store.assignments !== 'object') store.assignments = {};
+    if (!store.locks || typeof store.locks !== 'object') store.locks = {};
+    if (!store.sentLog || typeof store.sentLog !== 'object') store.sentLog = {};
+    if (!Array.isArray(store.excludedWorkerIds)) store.excludedWorkerIds = [];
+    if (!store.unavailability || typeof store.unavailability !== 'object') store.unavailability = {};
+    if (!Array.isArray(store.customHolidays)) store.customHolidays = [];
+    if (!Array.isArray(store.openHolidays)) store.openHolidays = [];
+    return store;
+  }
+
+  function getMonthStore(year, month) {
+    const key = getMonthKey(year, month);
     if (!state.schedulesByMonth[key]) {
-      state.schedulesByMonth[key] = {
-        assignments: {},
-        locks: {},
-        sentLog: {}
-      };
-    }
-    if (!state.schedulesByMonth[key].sentLog) {
-      state.schedulesByMonth[key].sentLog = {};
+      state.schedulesByMonth[key] = ensureStoreShape({});
+    } else {
+      ensureStoreShape(state.schedulesByMonth[key]);
     }
     return state.schedulesByMonth[key];
+  }
+
+  function getCurrentMonthStore() {
+    return getMonthStore(state.year, state.month);
+  }
+
+  function isWorkerActiveInMonth(worker, store) {
+    if (!worker || worker.active === false) return false;
+    return !(store.excludedWorkerIds || []).includes(worker.id);
+  }
+
+  function setWorkerActiveInMonth(workerId, isActive, store) {
+    const set = new Set(store.excludedWorkerIds || []);
+    if (isActive) {
+      set.delete(workerId);
+    } else {
+      set.add(workerId);
+    }
+    store.excludedWorkerIds = Array.from(set);
+  }
+
+  function getCalendarOptionsForStore(store) {
+    return {
+      useItalianHolidays: state.options.useItalianHolidays !== false,
+      holidays: store.customHolidays || [],
+      openHolidays: store.openHolidays || []
+    };
+  }
+
+  function getPreviousMonthLastDayAssignments(year, month) {
+    const prevYear = month === 0 ? year - 1 : year;
+    const prevMonth = month === 0 ? 11 : month - 1;
+    const prevKey = getMonthKey(prevYear, prevMonth);
+    const prevStore = state.schedulesByMonth[prevKey];
+    if (!prevStore || !prevStore.assignments) return null;
+
+    ensureStoreShape(prevStore);
+    const prevCal = Scheduler.buildMonthCalendar(
+      prevYear,
+      prevMonth,
+      getCalendarOptionsForStore(prevStore)
+    );
+    const lastDay = prevCal.days[prevCal.days.length - 1];
+    if (!lastDay || lastDay.isClosed) return null;
+
+    const out = {};
+    for (const slot of lastDay.slots) {
+      const wId = prevStore.assignments[`${lastDay.day}:${slot.slotKey}`];
+      if (wId) out[slot.slotKey] = wId;
+    }
+    return Object.keys(out).length > 0 ? out : null;
+  }
+
+  function pushUndoSnapshot() {
+    try {
+      const snapshot = JSON.stringify({
+        companyName: state.companyName,
+        year: state.year,
+        month: state.month,
+        workers: state.workers,
+        schedulesByMonth: state.schedulesByMonth,
+        options: state.options
+      });
+      if (undoStack.length > 0 && undoStack[undoStack.length - 1] === snapshot) {
+        return;
+      }
+      undoStack.push(snapshot);
+      if (undoStack.length > MAX_UNDO_STEPS) {
+        undoStack.shift();
+      }
+    } catch (_e) {
+      // Ignore serialization issues
+    }
+  }
+
+  function undoLastAction() {
+    if (undoStack.length === 0) return;
+    try {
+      const raw = undoStack.pop();
+      const parsed = JSON.parse(raw);
+      state.companyName = parsed.companyName;
+      state.year = parsed.year;
+      state.month = parsed.month;
+      state.workers = (parsed.workers || []).map(makeWorker);
+      state.schedulesByMonth = parsed.schedulesByMonth || {};
+      state.options = {
+        avoidSameShiftConsecutive: parsed.options?.avoidSameShiftConsecutive !== false,
+        avoidLateToEarly: parsed.options?.avoidLateToEarly !== false,
+        useItalianHolidays: parsed.options?.useItalianHolidays !== false
+      };
+      state.sendCustomMessageDirty = false;
+      saveState();
+      renderAll();
+      showToast('Ultima operazione annullata.');
+    } catch (_e) {
+      showToast('Impossibile annullare l’operazione.');
+    }
   }
 
   // DOM references
@@ -103,6 +211,7 @@
     btnModeMobile: document.getElementById('btnModeMobile'),
     monthSelect: document.getElementById('monthSelect'),
     yearSelect: document.getElementById('yearSelect'),
+    undoBtn: document.getElementById('undoBtn'),
     generateBtn: document.getElementById('generateBtn'),
     exportXlsxBtn: document.getElementById('exportXlsxBtn'),
     exportCsvBtn: document.getElementById('exportCsvBtn'),
@@ -122,6 +231,7 @@
     createCalendarInfo: document.getElementById('createCalendarInfo'),
     createAvoidSameShiftOpt: document.getElementById('createAvoidSameShiftOpt'),
     createAvoidLateToEarlyOpt: document.getElementById('createAvoidLateToEarlyOpt'),
+    createUseItalianHolidaysOpt: document.getElementById('createUseItalianHolidaysOpt'),
     createResetLocksOpt: document.getElementById('createResetLocksOpt'),
     createSelectedCount: document.getElementById('createSelectedCount'),
     createTotalCount: document.getElementById('createTotalCount'),
@@ -129,6 +239,11 @@
     createSelectNoneBtn: document.getElementById('createSelectNoneBtn'),
     createWorkerCheckboxes: document.getElementById('createWorkerCheckboxes'),
     createGoCompanyBtn: document.getElementById('createGoCompanyBtn'),
+    createHolidaysGrid: document.getElementById('createHolidaysGrid'),
+    unavailWorkerSelect: document.getElementById('unavailWorkerSelect'),
+    clearWorkerUnavailBtn: document.getElementById('clearWorkerUnavailBtn'),
+    unavailDayGrid: document.getElementById('unavailDayGrid'),
+    unavailSummaryList: document.getElementById('unavailSummaryList'),
     createGenerateAllBtn: document.getElementById('createGenerateAllBtn'),
 
     // Sidebar & Schedule Tab
@@ -143,8 +258,11 @@
     workerList: document.getElementById('workerList'),
     avoidSameShiftOpt: document.getElementById('avoidSameShiftOpt'),
     avoidLateToEarlyOpt: document.getElementById('avoidLateToEarlyOpt'),
+    useItalianHolidaysOpt: document.getElementById('useItalianHolidaysOpt'),
     importCsvInput: document.getElementById('importCsvInput'),
     clearLocksBtn: document.getElementById('clearLocksBtn'),
+    exportBackupBtn: document.getElementById('exportBackupBtn'),
+    importBackupInput: document.getElementById('importBackupInput'),
     statusBar: document.getElementById('statusBar'),
     warningsBox: document.getElementById('warningsBox'),
     scheduleTitle: document.getElementById('scheduleTitle'),
@@ -165,6 +283,8 @@
     newWorkerEmail: document.getElementById('newWorkerEmail'),
     newWorkerPhone: document.getElementById('newWorkerPhone'),
     toggleBulkBtn: document.getElementById('toggleBulkBtn'),
+    companyExportBackupBtn: document.getElementById('companyExportBackupBtn'),
+    companyImportBackupInput: document.getElementById('companyImportBackupInput'),
     resetDemoBtn: document.getElementById('resetDemoBtn'),
     clearWorkersBtn: document.getElementById('clearWorkersBtn'),
     bulkPanel: document.getElementById('bulkPanel'),
@@ -191,8 +311,16 @@
     resetMessageBtn: document.getElementById('resetMessageBtn'),
     sendEmailBtn: document.getElementById('sendEmailBtn'),
     sendWhatsAppBtn: document.getElementById('sendWhatsAppBtn'),
+    downloadIcsBtn: document.getElementById('downloadIcsBtn'),
     copyMessageBtn: document.getElementById('copyMessageBtn'),
     sendRosterStatus: document.getElementById('sendRosterStatus'),
+
+    // Confirmation modal
+    confirmModal: document.getElementById('confirmModal'),
+    confirmModalTitle: document.getElementById('confirmModalTitle'),
+    confirmModalBody: document.getElementById('confirmModalBody'),
+    confirmCancelBtn: document.getElementById('confirmCancelBtn'),
+    confirmOkBtn: document.getElementById('confirmOkBtn'),
 
     toast: document.getElementById('toast')
   };
@@ -206,6 +334,43 @@
       el.toast.classList.add('hidden');
     }, 3000);
   }
+
+  let confirmResolver = null;
+  function askConfirm(title, body, okLabel = 'Conferma') {
+    if (confirmResolver) {
+      confirmResolver(false);
+      confirmResolver = null;
+    }
+    el.confirmModalTitle.textContent = title;
+    el.confirmModalBody.textContent = body;
+    el.confirmOkBtn.textContent = okLabel;
+    el.confirmModal.classList.remove('hidden');
+    el.confirmCancelBtn.focus();
+
+    return new Promise((resolve) => {
+      confirmResolver = resolve;
+    });
+  }
+
+  function closeConfirm(result) {
+    el.confirmModal.classList.add('hidden');
+    if (confirmResolver) {
+      const resolve = confirmResolver;
+      confirmResolver = null;
+      resolve(result);
+    }
+  }
+
+  el.confirmCancelBtn.addEventListener('click', () => closeConfirm(false));
+  el.confirmOkBtn.addEventListener('click', () => closeConfirm(true));
+  el.confirmModal.addEventListener('click', (e) => {
+    if (e.target === el.confirmModal) closeConfirm(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !el.confirmModal.classList.contains('hidden')) {
+      closeConfirm(false);
+    }
+  });
 
   function applyViewMode(mode) {
     state.viewMode = mode === 'mobile' ? 'mobile' : 'desktop';
@@ -251,7 +416,8 @@
         if (parsed.options && typeof parsed.options === 'object') {
           state.options = {
             avoidSameShiftConsecutive: parsed.options.avoidSameShiftConsecutive !== false,
-            avoidLateToEarly: parsed.options.avoidLateToEarly !== false
+            avoidLateToEarly: parsed.options.avoidLateToEarly !== false,
+            useItalianHolidays: parsed.options.useItalianHolidays !== false
           };
         }
         return true;
@@ -284,7 +450,8 @@
         if (parsed.options && typeof parsed.options === 'object') {
           state.options = {
             avoidSameShiftConsecutive: parsed.options.avoidSameShiftConsecutive !== false,
-            avoidLateToEarly: parsed.options.avoidLateToEarly !== false
+            avoidLateToEarly: parsed.options.avoidLateToEarly !== false,
+            useItalianHolidays: true
           };
         }
         return true;
@@ -302,13 +469,23 @@
     return PALETTE[idx % PALETTE.length];
   }
 
-  function runGeneration() {
+  function runGeneration({ recordUndo = true } = {}) {
+    if (recordUndo) pushUndoSnapshot();
     const store = getCurrentMonthStore();
+    const monthWorkers = state.workers.map((w) => ({
+      ...w,
+      active: isWorkerActiveInMonth(w, store)
+    }));
+    const prevDayAssignments = getPreviousMonthLastDayAssignments(state.year, state.month);
+
     const result = Scheduler.generateSchedule({
       year: state.year,
       month: state.month,
-      workers: state.workers,
+      workers: monthWorkers,
       locks: store.locks,
+      unavailability: store.unavailability,
+      prevDayAssignments,
+      calendarOptions: getCalendarOptionsForStore(store),
       options: state.options
     });
     store.assignments = result.assignments;
@@ -319,8 +496,11 @@
 
   function ensureMonthScheduleExists() {
     const store = getCurrentMonthStore();
-    if (Object.keys(store.assignments).length === 0 && state.workers.some((w) => w.active !== false)) {
-      runGeneration();
+    if (
+      Object.keys(store.assignments).length === 0 &&
+      state.workers.some((w) => isWorkerActiveInMonth(w, store))
+    ) {
+      runGeneration({ recordUndo: false });
     } else {
       renderAll();
     }
@@ -328,12 +508,19 @@
 
   function getCurrentEvaluation() {
     const store = getCurrentMonthStore();
-    const calendar = Scheduler.buildMonthCalendar(state.year, state.month);
-    const activeWorkers = state.workers.filter((w) => w.active !== false);
+    const calendar = Scheduler.buildMonthCalendar(
+      state.year,
+      state.month,
+      getCalendarOptionsForStore(store)
+    );
+    const activeWorkers = state.workers.filter((w) => isWorkerActiveInMonth(w, store));
+    const prevDayAssignments = getPreviousMonthLastDayAssignments(state.year, state.month);
     const validation = Scheduler.validateAndSummarize({
       calendar,
       workers: activeWorkers,
-      assignments: store.assignments
+      assignments: store.assignments,
+      unavailability: store.unavailability,
+      prevDayAssignments
     });
     return { calendar, activeWorkers, validation, store };
   }
@@ -381,21 +568,56 @@
     populateMonthYearSelects(el.createMonthSelect, el.createYearSelect);
     el.avoidSameShiftOpt.checked = state.options.avoidSameShiftConsecutive;
     el.avoidLateToEarlyOpt.checked = state.options.avoidLateToEarly;
+    el.useItalianHolidaysOpt.checked = state.options.useItalianHolidays !== false;
     el.createAvoidSameShiftOpt.checked = state.options.avoidSameShiftConsecutive;
     el.createAvoidLateToEarlyOpt.checked = state.options.avoidLateToEarly;
+    el.createUseItalianHolidaysOpt.checked = state.options.useItalianHolidays !== false;
     el.companyTotalBadge.textContent = String(state.workers.length);
     el.sidebarCompanyLabel.textContent = state.companyName ? state.companyName : 'Lista aziendale';
+    el.undoBtn.disabled = undoStack.length === 0;
+  }
+
+  function toggleHolidayForDay(dayObj, store) {
+    if (dayObj.isSunday) return;
+    pushUndoSnapshot();
+
+    const italianMap = Scheduler.getItalianHolidaysForMonth(state.year, state.month);
+    const isNational = state.options.useItalianHolidays !== false && italianMap.has(dayObj.day);
+    const customSet = new Set(store.customHolidays || []);
+    const openSet = new Set(store.openHolidays || []);
+
+    if (dayObj.isHoliday) {
+      if (isNational) openSet.add(dayObj.day);
+      customSet.delete(dayObj.day);
+      showToast(`${dayObj.day} ${Scheduler.MONTH_NAMES_IT[state.month]} riaperto come giorno lavorativo.`);
+    } else {
+      if (isNational) openSet.delete(dayObj.day);
+      else customSet.add(dayObj.day);
+      for (const sKey of ['mf_1', 'mf_2', 'mf_3', 'sat_1', 'sat_2']) {
+        delete store.assignments[`${dayObj.day}:${sKey}`];
+        delete store.locks[`${dayObj.day}:${sKey}`];
+      }
+      showToast(`${dayObj.day} ${Scheduler.MONTH_NAMES_IT[state.month]} segnato come Festivo/Chiuso.`);
+    }
+
+    store.customHolidays = Array.from(customSet).sort((a, b) => a - b);
+    store.openHolidays = Array.from(openSet).sort((a, b) => a - b);
+    state.sendCustomMessageDirty = false;
+    saveState();
+    renderAll();
   }
 
   // TAB 0: CREA TURNI
-  function renderCreateTab() {
-    const cal = Scheduler.buildMonthCalendar(state.year, state.month);
+  function renderCreateTab(evaluation) {
+    const { calendar: cal, store } = evaluation;
     let mfDays = 0;
     let satDays = 0;
     let sunDays = 0;
+    let holidayDays = 0;
     let totalSlots = 0;
     for (const d of cal.days) {
       if (d.isSunday) sunDays++;
+      else if (d.isHoliday) holidayDays++;
       else if (d.isSaturday) satDays++;
       else mfDays++;
       totalSlots += d.slots.length;
@@ -406,53 +628,161 @@
       `<strong>${escapeHtml(cal.monthName)} ${cal.year}</strong> (${cal.daysInMonth} giorni):<br>` +
       `• ${mfDays} giorni Lun–Ven (${mfDays * 3} turni · ${mfDays * 8}h)<br>` +
       `• ${satDays} Sabati (${satDays * 2} turni · ${satDays * 14}h)<br>` +
-      `• ${sunDays} Domeniche festa<br>` +
+      `• ${sunDays} Domeniche + ${holidayDays} festività chiuse<br>` +
       `<strong>Totale da coprire: ${totalSlots} turni (${totalHours} ore)</strong>`;
 
-    const activeCount = state.workers.filter((w) => w.active !== false).length;
-    el.createSelectedCount.textContent = String(activeCount);
-    el.createTotalCount.textContent = String(state.workers.length);
+    const eligibleCompanyWorkers = state.workers.filter((w) => w.active !== false);
+    const activeInMonthCount = eligibleCompanyWorkers.filter((w) => isWorkerActiveInMonth(w, store)).length;
+    el.createSelectedCount.textContent = String(activeInMonthCount);
+    el.createTotalCount.textContent = String(eligibleCompanyWorkers.length);
 
     el.createWorkerCheckboxes.innerHTML = '';
-    if (state.workers.length === 0) {
+    if (eligibleCompanyWorkers.length === 0) {
       const p = document.createElement('p');
       p.className = 'hint';
-      p.textContent = 'Nessun operaio in anagrafica. Aggiungi gli operai nella sezione "Operai".';
+      p.textContent = 'Nessun operaio attivo in anagrafica. Aggiungi o attiva gli operai nella sezione "Operai".';
       el.createWorkerCheckboxes.appendChild(p);
+    } else {
+      eligibleCompanyWorkers.forEach((w) => {
+        const checked = isWorkerActiveInMonth(w, store);
+        const label = document.createElement('label');
+        label.className = 'create-worker-card' + (checked ? ' checked' : '');
+
+        const chk = document.createElement('input');
+        chk.type = 'checkbox';
+        chk.checked = checked;
+        chk.addEventListener('change', () => {
+          pushUndoSnapshot();
+          setWorkerActiveInMonth(w.id, chk.checked, store);
+          if (!chk.checked && state.highlightedWorkerId === w.id) {
+            state.highlightedWorkerId = null;
+          }
+          saveState();
+          renderAll();
+        });
+
+        const meta = document.createElement('div');
+        meta.className = 'create-worker-meta';
+        const strong = document.createElement('strong');
+        strong.textContent = w.name;
+        const sub = document.createElement('span');
+        sub.textContent = w.role || (checked ? 'Disponibile nel mese' : 'Escluso in questo mese');
+        meta.append(strong, sub);
+
+        label.append(chk, meta);
+        el.createWorkerCheckboxes.appendChild(label);
+      });
+    }
+
+    // Step 4: Holidays grid
+    el.createHolidaysGrid.innerHTML = '';
+    for (const dayObj of cal.days) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'mini-day-btn';
+      if (dayObj.isSunday) {
+        btn.classList.add('is-sun');
+        btn.disabled = true;
+        btn.title = 'Domenica (sempre festa)';
+      } else if (dayObj.isHoliday) {
+        btn.classList.add('is-holiday');
+        btn.title = `${dayObj.holidayName || 'Festivo'} — Clicca per riaprire`;
+      } else if (dayObj.isSaturday) {
+        btn.classList.add('is-sat');
+        btn.title = 'Sabato lavorativo — Clicca per segnare festivo';
+      } else {
+        btn.title = 'Giorno lavorativo — Clicca per segnare festivo';
+      }
+
+      const num = document.createElement('span');
+      num.textContent = String(dayObj.day);
+      const sub = document.createElement('small');
+      sub.textContent = dayObj.isHoliday ? 'Festa' : dayObj.dayNameShort;
+      btn.append(num, sub);
+
+      if (!dayObj.isSunday) {
+        btn.addEventListener('click', () => toggleHolidayForDay(dayObj, store));
+      }
+      el.createHolidaysGrid.appendChild(btn);
+    }
+
+    // Step 5: Per-worker unavailability/leave grid
+    el.unavailWorkerSelect.innerHTML = '';
+    const activeWorkers = eligibleCompanyWorkers.filter((w) => isWorkerActiveInMonth(w, store));
+    if (activeWorkers.length === 0) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'Nessun operaio selezionato nel mese';
+      el.unavailWorkerSelect.appendChild(opt);
+      el.unavailDayGrid.innerHTML = '';
+      el.unavailSummaryList.innerHTML = '';
       return;
     }
 
-    state.workers.forEach((w) => {
-      const label = document.createElement('label');
-      label.className = 'create-worker-card' + (w.active !== false ? ' checked' : '');
+    if (!state.unavailSelectedWorkerId || !activeWorkers.some((w) => w.id === state.unavailSelectedWorkerId)) {
+      state.unavailSelectedWorkerId = activeWorkers[0].id;
+    }
 
-      const chk = document.createElement('input');
-      chk.type = 'checkbox';
-      chk.checked = w.active !== false;
-      chk.addEventListener('change', () => {
-        w.active = chk.checked;
-        if (!w.active && state.highlightedWorkerId === w.id) {
-          state.highlightedWorkerId = null;
-        }
-        saveState();
-        renderAll();
-      });
-
-      const meta = document.createElement('div');
-      meta.className = 'create-worker-meta';
-      const strong = document.createElement('strong');
-      strong.textContent = w.name;
-      const sub = document.createElement('span');
-      sub.textContent = w.role || (w.active !== false ? 'Disponibile' : 'Escluso');
-      meta.append(strong, sub);
-
-      label.append(chk, meta);
-      el.createWorkerCheckboxes.appendChild(label);
+    activeWorkers.forEach((w) => {
+      const opt = document.createElement('option');
+      opt.value = w.id;
+      const cnt = (store.unavailability[w.id] || []).length;
+      opt.textContent = cnt > 0 ? `${w.name} (${cnt} gg assente)` : w.name;
+      el.unavailWorkerSelect.appendChild(opt);
     });
+    el.unavailWorkerSelect.value = state.unavailSelectedWorkerId;
+
+    const selectedUnavailSet = new Set(store.unavailability[state.unavailSelectedWorkerId] || []);
+    el.unavailDayGrid.innerHTML = '';
+    for (const dayObj of cal.days) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'mini-day-btn';
+      if (dayObj.isClosed) {
+        btn.classList.add(dayObj.isSunday ? 'is-sun' : 'is-holiday');
+        btn.disabled = true;
+        btn.title = dayObj.holidayName || 'Chiuso';
+      } else {
+        if (dayObj.isSaturday) btn.classList.add('is-sat');
+        if (selectedUnavailSet.has(dayObj.day)) btn.classList.add('is-unavail');
+        btn.title = selectedUnavailSet.has(dayObj.day)
+          ? 'Assente/Ferie — Clicca per rimuovere'
+          : 'Disponibile — Clicca per segnare assenza/ferie';
+        btn.addEventListener('click', () => {
+          pushUndoSnapshot();
+          const cur = new Set(store.unavailability[state.unavailSelectedWorkerId] || []);
+          if (cur.has(dayObj.day)) cur.delete(dayObj.day);
+          else cur.add(dayObj.day);
+          if (cur.size === 0) delete store.unavailability[state.unavailSelectedWorkerId];
+          else store.unavailability[state.unavailSelectedWorkerId] = Array.from(cur).sort((a, b) => a - b);
+          saveState();
+          renderAll();
+        });
+      }
+
+      const num = document.createElement('span');
+      num.textContent = String(dayObj.day);
+      const sub = document.createElement('small');
+      sub.textContent = selectedUnavailSet.has(dayObj.day) ? 'Ferie' : dayObj.dayNameShort;
+      btn.append(num, sub);
+      el.unavailDayGrid.appendChild(btn);
+    }
+
+    el.unavailSummaryList.innerHTML = '';
+    for (const w of activeWorkers) {
+      const daysList = store.unavailability[w.id] || [];
+      if (daysList.length === 0) continue;
+      const chip = document.createElement('span');
+      chip.className = 'unavail-summary-chip';
+      chip.textContent = `${w.name}: gg ${daysList.join(', ')}`;
+      el.unavailSummaryList.appendChild(chip);
+    }
   }
 
-  function renderSidebarWorkers(statsWorkers) {
-    const activeCount = state.workers.filter((w) => w.active !== false).length;
+  function renderSidebarWorkers(evaluation) {
+    const { validation, store } = evaluation;
+    const statsWorkers = validation.stats.workers;
+    const activeCount = state.workers.filter((w) => isWorkerActiveInMonth(w, store)).length;
     el.activeWorkerCount.textContent = String(activeCount);
 
     const statsById = new Map((statsWorkers || []).map((st) => [st.id, st]));
@@ -468,9 +798,10 @@
 
     state.workers.forEach((worker) => {
       const color = getWorkerColor(worker.id);
+      const activeInMonth = isWorkerActiveInMonth(worker, store);
       const item = document.createElement('div');
       item.className = 'worker-item';
-      if (worker.active === false) item.classList.add('inactive');
+      if (!activeInMonth) item.classList.add('inactive');
       if (state.highlightedWorkerId === worker.id) item.classList.add('highlighted');
 
       const left = document.createElement('div');
@@ -478,21 +809,25 @@
 
       const chk = document.createElement('input');
       chk.type = 'checkbox';
-      chk.checked = worker.active !== false;
-      chk.title = chk.checked
-        ? 'Spunta attiva: considerato per i turni. Deseleziona per escluderlo.'
-        : 'Spunta disattivata: escluso dai turni. Seleziona per includerlo.';
+      chk.checked = activeInMonth;
+      chk.disabled = worker.active === false;
+      chk.title = worker.active === false
+        ? 'Disattivato in Anagrafica Azienda.'
+        : chk.checked
+          ? 'Partecipa ai turni di questo mese. Deseleziona per escluderlo dal mese.'
+          : 'Escluso dai turni di questo mese. Seleziona per includerlo.';
       chk.addEventListener('change', () => {
-        worker.active = chk.checked;
-        if (!worker.active && state.highlightedWorkerId === worker.id) {
+        pushUndoSnapshot();
+        setWorkerActiveInMonth(worker.id, chk.checked, store);
+        if (!chk.checked && state.highlightedWorkerId === worker.id) {
           state.highlightedWorkerId = null;
         }
         saveState();
         renderAll();
         showToast(
-          worker.active
-            ? `${worker.name} incluso nei turni.`
-            : `${worker.name} escluso dai turni. Clicca "Genera Orario" per aggiornare.`
+          chk.checked
+            ? `${worker.name} incluso in ${Scheduler.MONTH_NAMES_IT[state.month]}.`
+            : `${worker.name} escluso per ${Scheduler.MONTH_NAMES_IT[state.month]}. Clicca "Genera Orario" per aggiornare.`
         );
       });
 
@@ -509,7 +844,8 @@
 
         const commitEdit = () => {
           const nextName = editInput.value.trim();
-          if (nextName) {
+          if (nextName && nextName !== worker.name) {
+            pushUndoSnapshot();
             worker.name = nextName;
             saveState();
           }
@@ -598,6 +934,7 @@
       removeBtn.textContent = '×';
       removeBtn.title = 'Elimina operaio';
       removeBtn.addEventListener('click', () => {
+        pushUndoSnapshot();
         removeWorkerById(worker.id);
       });
 
@@ -620,16 +957,23 @@
           if (monthStore.locks[k] === workerId) delete monthStore.locks[k];
         }
       }
+      if (Array.isArray(monthStore.excludedWorkerIds)) {
+        monthStore.excludedWorkerIds = monthStore.excludedWorkerIds.filter((id) => id !== workerId);
+      }
+      if (monthStore.unavailability && monthStore.unavailability[workerId]) {
+        delete monthStore.unavailability[workerId];
+      }
     }
     if (state.highlightedWorkerId === workerId) state.highlightedWorkerId = null;
     if (state.sendWorkerId === workerId) state.sendWorkerId = null;
     if (state.printWorkerId === workerId) state.printWorkerId = 'ALL';
+    if (state.unavailSelectedWorkerId === workerId) state.unavailSelectedWorkerId = null;
     saveState();
     renderAll();
   }
 
   function renderStatusAndWarnings(evaluation) {
-    const { activeWorkers, validation } = evaluation;
+    const { activeWorkers, validation, store } = evaluation;
     const { checks, stats } = validation;
 
     el.statusBar.innerHTML = '';
@@ -666,6 +1010,20 @@
       text: `Coperti: ${checks.filledSlots}/${checks.totalSlots}`
     });
 
+    if (!checks.noUnavailabilityConflicts) {
+      pills.push({
+        cls: 'err',
+        text: `✕ ${checks.unavailabilityConflicts.length} turni su ferie`
+      });
+    }
+
+    if (checks.lateToEarlyTransitions && checks.lateToEarlyTransitions.length > 0) {
+      pills.push({
+        cls: 'warn',
+        text: `⚠ ${checks.lateToEarlyTransitions.length} chiusure → aperture`
+      });
+    }
+
     if (activeWorkers.length > 0) {
       pills.push({
         cls: 'neutral',
@@ -687,7 +1045,7 @@
 
     const combinedWarnings = [];
     if (activeWorkers.length > 0 && activeWorkers.length < 3) {
-      combinedWarnings.push('Servono almeno 3 operai attivi per coprire i 3 turni Lun–Ven senza doppi turni giornalieri.');
+      combinedWarnings.push('Servono almeno 3 operai attivi nel mese per coprire i 3 turni Lun–Ven senza doppi turni giornalieri.');
     }
     if (activeWorkers.length > 17) {
       combinedWarnings.push(`Con ${activeWorkers.length} operai attivi, una settimana da 17 turni non basta per dare 1 turno a tutti ogni settimana.`);
@@ -699,18 +1057,19 @@
       combinedWarnings.push('Nota settimana parziale di inizio/fine mese — ' + note);
     }
 
-    const inactiveAssignedNames = new Set();
+    const activeIds = new Set(activeWorkers.map((w) => w.id));
     const inactiveWorkerMap = new Map(
-      state.workers.filter((w) => w.active === false).map((w) => [w.id, w.name])
+      state.workers.filter((w) => !activeIds.has(w.id)).map((w) => [w.id, w.name])
     );
-    for (const wId of Object.values(evaluation.store.assignments || {})) {
+    const inactiveAssignedNames = new Set();
+    for (const wId of Object.values(store.assignments || {})) {
       if (inactiveWorkerMap.has(wId)) {
         inactiveAssignedNames.add(inactiveWorkerMap.get(wId));
       }
     }
     if (inactiveAssignedNames.size > 0) {
       combinedWarnings.push(
-        `Dipendenti senza spunta ancora presenti in tabella (${Array.from(inactiveAssignedNames).join(', ')}): clicca "Genera Orario" o sostituiscili dal menu a tendina.`
+        `Dipendenti esclusi dal mese ancora presenti in tabella (${Array.from(inactiveAssignedNames).join(', ')}): clicca "Genera Orario" o sostituiscili dal menu a tendina.`
       );
     }
 
@@ -743,12 +1102,17 @@
     emptyOpt.textContent = '— Non assegnato —';
     select.appendChild(emptyOpt);
 
-    const activeWorkers = state.workers.filter((w) => w.active !== false);
+    const activeWorkers = state.workers.filter((w) => isWorkerActiveInMonth(w, store));
+    const isUnavail = (wId) => (store.unavailability[wId] || []).includes(dayObj.day);
+
     const availableWorkers = activeWorkers.filter(
-      (w) => !sameDayWorkerSet.has(w.id) || w.id === assignedId
+      (w) => (!sameDayWorkerSet.has(w.id) && !isUnavail(w.id)) || w.id === assignedId
+    );
+    const unavailWorkers = activeWorkers.filter(
+      (w) => isUnavail(w.id) && w.id !== assignedId
     );
     const busyWorkers = activeWorkers.filter(
-      (w) => sameDayWorkerSet.has(w.id) && w.id !== assignedId
+      (w) => sameDayWorkerSet.has(w.id) && !isUnavail(w.id) && w.id !== assignedId
     );
 
     if (assignedId && !activeWorkers.some((w) => w.id === assignedId)) {
@@ -756,7 +1120,7 @@
       if (inactiveAssigned) {
         const currentOpt = document.createElement('option');
         currentOpt.value = inactiveAssigned.id;
-        currentOpt.textContent = `${inactiveAssigned.name} (spunta disattivata)`;
+        currentOpt.textContent = `${inactiveAssigned.name} (escluso dal mese)`;
         select.appendChild(currentOpt);
       }
     }
@@ -767,10 +1131,23 @@
       availableWorkers.forEach((w) => {
         const opt = document.createElement('option');
         opt.value = w.id;
-        opt.textContent = w.name;
+        opt.textContent = isUnavail(w.id) ? `${w.name} (ferie/indisponibile!)` : w.name;
         availGroup.appendChild(opt);
       });
       select.appendChild(availGroup);
+    }
+
+    if (unavailWorkers.length > 0) {
+      const unavailGroup = document.createElement('optgroup');
+      unavailGroup.label = 'In ferie / non disponibili oggi';
+      unavailWorkers.forEach((w) => {
+        const opt = document.createElement('option');
+        opt.value = w.id;
+        opt.textContent = `${w.name} (ferie/assente)`;
+        opt.disabled = true;
+        unavailGroup.appendChild(opt);
+      });
+      select.appendChild(unavailGroup);
     }
 
     if (busyWorkers.length > 0) {
@@ -794,7 +1171,7 @@
       select.style.borderColor = color.border;
     }
 
-    if (conflictWorkerIds.has(assignedId)) {
+    if (conflictWorkerIds.has(assignedId) || (assignedId && isUnavail(assignedId))) {
       select.classList.add('is-conflict');
     }
 
@@ -807,6 +1184,7 @@
     }
 
     select.addEventListener('change', () => {
+      pushUndoSnapshot();
       const val = select.value;
       if (val) {
         store.assignments[key] = val;
@@ -829,8 +1207,10 @@
       : 'Clicca per bloccare questo turno prima di rigenerare.';
     lockBtn.addEventListener('click', () => {
       if (store.locks[key]) {
+        pushUndoSnapshot();
         delete store.locks[key];
       } else if (store.assignments[key]) {
+        pushUndoSnapshot();
         store.locks[key] = store.assignments[key];
       } else {
         showToast('Assegna prima un operaio per poter bloccare il turno.');
@@ -885,9 +1265,7 @@
       conflictsByDay.get(c.day).add(c.workerId);
     }
 
-    // 1. Desktop table
     el.scheduleBody.innerHTML = '';
-    // 2. Smartphone cards
     el.mobileScheduleCards.innerHTML = '';
 
     let lastWeekIndex = -1;
@@ -913,8 +1291,8 @@
       }
 
       const tr = document.createElement('tr');
-      if (dayObj.isSaturday) tr.className = 'row-sat';
-      if (dayObj.isSunday) tr.className = 'row-sun';
+      if (dayObj.isClosed) tr.className = 'row-sun';
+      else if (dayObj.isSaturday) tr.className = 'row-sat';
 
       const dayTd = document.createElement('td');
       const dayDiv = document.createElement('div');
@@ -925,24 +1303,49 @@
       const nameSpan = document.createElement('span');
       nameSpan.textContent = dayObj.dayNameShort;
       dayDiv.append(numSpan, nameSpan);
+
+      if (!dayObj.isSunday) {
+        const holToggleBtn = document.createElement('button');
+        holToggleBtn.type = 'button';
+        holToggleBtn.className = 'day-holiday-toggle';
+        holToggleBtn.textContent = dayObj.isHoliday ? '🔓' : '🎉';
+        holToggleBtn.title = dayObj.isHoliday
+          ? 'Riapri giorno come lavorativo'
+          : 'Segna giorno come festivo/chiuso';
+        holToggleBtn.addEventListener('click', () => toggleHolidayForDay(dayObj, store));
+        dayDiv.appendChild(holToggleBtn);
+      }
+
       dayTd.appendChild(dayDiv);
       tr.appendChild(dayTd);
 
       const mCard = document.createElement('div');
-      mCard.className = 'mobile-day-card' + (dayObj.isSaturday ? ' is-sat' : '') + (dayObj.isSunday ? ' is-sun' : '');
+      mCard.className = 'mobile-day-card' + (dayObj.isClosed ? ' is-sun' : dayObj.isSaturday ? ' is-sat' : '');
       const mHeader = document.createElement('div');
       mHeader.className = 'mobile-day-header';
       mHeader.innerHTML = `<span>${escapeHtml(dayObj.dayNameFull)} ${String(dayObj.day).padStart(2, '0')} ${escapeHtml(calendar.monthName)}</span>`;
 
-      if (dayObj.isSunday) {
+      if (dayObj.isClosed) {
         const sunTd = document.createElement('td');
         sunTd.colSpan = 3;
         sunTd.className = 'sun-holiday';
-        sunTd.textContent = '🌴 FESTA — Domenica (Riposo)';
+        const holidayText = dayObj.isHoliday
+          ? `🎉 FESTA — ${dayObj.holidayName || 'Festivo'} (Chiuso)`
+          : '🌴 FESTA — Domenica (Riposo)';
+        sunTd.textContent = holidayText;
+
+        if (dayObj.isHoliday && !dayObj.isSunday) {
+          const reopenBtn = document.createElement('button');
+          reopenBtn.type = 'button';
+          reopenBtn.className = 'btn btn-ghost btn-xs holiday-reopen-btn';
+          reopenBtn.textContent = 'Riapri giorno';
+          reopenBtn.addEventListener('click', () => toggleHolidayForDay(dayObj, store));
+          sunTd.appendChild(reopenBtn);
+        }
         tr.appendChild(sunTd);
 
         const badge = document.createElement('span');
-        badge.textContent = '🌴 FESTA';
+        badge.textContent = dayObj.isHoliday ? `🎉 ${dayObj.holidayName || 'Festa'}` : '🌴 FESTA';
         mHeader.appendChild(badge);
         mCard.appendChild(mHeader);
       } else {
@@ -963,7 +1366,7 @@
         } else {
           tr.appendChild(buildSlotCell(dayObj, dayObj.slots[0], sameDayWorkers, dayConflicts, store));
           tr.appendChild(buildSlotCell(dayObj, dayObj.slots[1], sameDayWorkers, dayConflicts, store));
-          tr.appendChild(buildSlotCell(dayObj, dayObj.slots[2], sameDayWorkerSetSafe(sameDayWorkers), dayConflicts, store));
+          tr.appendChild(buildSlotCell(dayObj, dayObj.slots[2], sameDayWorkers, dayConflicts, store));
         }
 
         const mTypeBadge = document.createElement('span');
@@ -993,10 +1396,6 @@
       el.scheduleBody.appendChild(tr);
       el.mobileScheduleCards.appendChild(mCard);
     }
-  }
-
-  function sameDayWorkerSetSafe(s) {
-    return s;
   }
 
   function renderSummaryTable(evaluation) {
@@ -1038,13 +1437,13 @@
       const tr = document.createElement('tr');
       const td = document.createElement('td');
       td.colSpan = fixedCols.length + calendar.weeks.length;
-      td.textContent = 'Nessun operaio attivo.';
+      td.textContent = 'Nessun operaio attivo nel mese.';
       tr.appendChild(td);
       el.summaryBody.appendChild(tr);
 
       const p = document.createElement('p');
       p.className = 'hint';
-      p.textContent = 'Nessun operaio attivo.';
+      p.textContent = 'Nessun operaio attivo nel mese.';
       el.mobileSummaryCards.appendChild(p);
       return;
     }
@@ -1099,7 +1498,6 @@
 
       el.summaryBody.appendChild(tr);
 
-      // Mobile summary card
       const mSum = document.createElement('div');
       mSum.className = 'mobile-summary-card';
       mSum.innerHTML = `
@@ -1169,13 +1567,7 @@
         }
         worker[field] = nextVal;
         saveState();
-        // Refresh other panels without destroying the company table while clicking buttons
-        const ev = getCurrentEvaluation();
-        renderCreateTab();
-        renderSidebarWorkers(ev.validation.stats.workers);
-        renderScheduleTable(ev);
-        renderSummaryTable(ev);
-        renderPrintAndSendTab(ev);
+        renderPeriodControls();
       });
       return input;
     };
@@ -1188,7 +1580,9 @@
       const chk = document.createElement('input');
       chk.type = 'checkbox';
       chk.checked = worker.active !== false;
+      chk.title = 'Attivo in azienda (valido per tutti i mesi)';
       chk.addEventListener('change', () => {
+        pushUndoSnapshot();
         worker.active = chk.checked;
         saveState();
         renderAll();
@@ -1245,6 +1639,7 @@
         delBtn.textContent = '🗑️';
         delBtn.title = 'Elimina operaio dall’azienda';
         delBtn.addEventListener('click', () => {
+          pushUndoSnapshot();
           removeWorkerById(worker.id);
         });
         return [printBtn, sendBtn, delBtn];
@@ -1255,7 +1650,6 @@
       tr.appendChild(actionsTd);
       el.companyTableBody.appendChild(tr);
 
-      // Mobile Company Card
       const mCard = document.createElement('div');
       mCard.className = 'mobile-company-card';
 
@@ -1268,12 +1662,13 @@
       mChk.type = 'checkbox';
       mChk.checked = worker.active !== false;
       mChk.addEventListener('change', () => {
+        pushUndoSnapshot();
         worker.active = mChk.checked;
         saveState();
         renderAll();
       });
       const mTitle = document.createElement('strong');
-      mTitle.textContent = 'Attivo nei turni';
+      mTitle.textContent = 'Attivo in azienda';
       activeLbl.append(mChk, mTitle);
 
       const mCnt = document.createElement('span');
@@ -1343,12 +1738,15 @@
 
     for (const dayObj of calendar.days) {
       const tr = document.createElement('tr');
-      if (dayObj.isSunday) tr.className = 'is-sun';
-      if (dayObj.isSaturday) tr.className = 'is-sat';
+      if (dayObj.isClosed) tr.className = 'is-sun';
+      else if (dayObj.isSaturday) tr.className = 'is-sat';
 
       const dayLabel = `${String(dayObj.day).padStart(2, '0')} ${dayObj.dayNameShort}`;
-      if (dayObj.isSunday) {
-        tr.innerHTML = `<td class="print-day-col"><strong>${dayLabel}</strong></td><td colspan="3" class="print-sun-cell">FESTA (Domenica — Riposo)</td>`;
+      if (dayObj.isClosed) {
+        const reason = dayObj.isHoliday
+          ? `FESTA (${escapeHtml(dayObj.holidayName || 'Festivo')} — Chiuso)`
+          : 'FESTA (Domenica — Riposo)';
+        tr.innerHTML = `<td class="print-day-col"><strong>${dayLabel}</strong></td><td colspan="3" class="print-sun-cell">${reason}</td>`;
       } else if (dayObj.isSaturday) {
         const w1 = workerMap.get(store.assignments[`${dayObj.day}:sat_1`]) || '—';
         const w2 = workerMap.get(store.assignments[`${dayObj.day}:sat_2`]) || '—';
@@ -1433,17 +1831,20 @@
       tr.innerHTML = '<td colspan="4">Nessun turno assegnato per questo mese.</td>';
       tbody.appendChild(tr);
     } else {
+      const unavailDays = new Set(store.unavailability[worker.id] || []);
       for (const item of rowsToShow) {
         const tr = document.createElement('tr');
-        if (item.isSunday) tr.className = 'is-sun';
+        if (item.isClosed) tr.className = 'is-sun';
         else if (item.slot) tr.className = 'is-working';
         else if (item.isSaturday) tr.className = 'is-sat';
 
         const dateLabel = `${String(item.day).padStart(2, '0')} ${calendar.monthName}`;
-        let shiftHtml = 'Riposo';
+        let shiftHtml = unavailDays.has(item.day) ? 'Ferie / Assente' : 'Riposo';
         let hoursText = '—';
-        if (item.isSunday) {
-          shiftHtml = 'FESTA (Domenica)';
+        if (item.isClosed) {
+          shiftHtml = item.isHoliday
+            ? `FESTA (${escapeHtml(item.holidayName || 'Festivo')})`
+            : 'FESTA (Domenica)';
         } else if (item.slot) {
           shiftHtml = `<strong class="print-worker-name">TURNO ${escapeHtml(item.slot.label)}</strong>`;
           hoursText = `${item.slot.hours}h`;
@@ -1494,12 +1895,12 @@
     el.printWorkerSelect.innerHTML = '';
     const allOpt = document.createElement('option');
     allOpt.value = 'ALL';
-    allOpt.textContent = 'Tutti gli operai attivi (1 scheda per pagina)';
+    allOpt.textContent = 'Tutti gli operai attivi nel mese (1 scheda per pagina)';
     el.printWorkerSelect.appendChild(allOpt);
     state.workers.forEach((w) => {
       const opt = document.createElement('option');
       opt.value = w.id;
-      opt.textContent = w.active === false ? `${w.name} (non attivo)` : w.name;
+      opt.textContent = isWorkerActiveInMonth(w, store) ? w.name : `${w.name} (non attivo nel mese)`;
       el.printWorkerSelect.appendChild(opt);
     });
     if (
@@ -1516,7 +1917,7 @@
     } else {
       const targets =
         state.printWorkerId === 'ALL'
-          ? state.workers.filter((w) => w.active !== false)
+          ? state.workers.filter((w) => isWorkerActiveInMonth(w, store))
           : state.workers.filter((w) => w.id === state.printWorkerId);
 
       if (targets.length === 0) {
@@ -1610,14 +2011,20 @@
   function renderAll() {
     applyViewMode(state.viewMode);
     renderPeriodControls();
-    renderCreateTab();
     const evaluation = getCurrentEvaluation();
-    renderSidebarWorkers(evaluation.validation.stats.workers);
-    renderStatusAndWarnings(evaluation);
-    renderScheduleTable(evaluation);
-    renderSummaryTable(evaluation);
-    renderCompanyTab(evaluation);
-    renderPrintAndSendTab(evaluation);
+
+    if (state.activeTab === 'create') {
+      renderCreateTab(evaluation);
+    } else if (state.activeTab === 'schedule') {
+      renderSidebarWorkers(evaluation);
+      renderStatusAndWarnings(evaluation);
+      renderScheduleTable(evaluation);
+      renderSummaryTable(evaluation);
+    } else if (state.activeTab === 'company') {
+      renderCompanyTab(evaluation);
+    } else if (state.activeTab === 'print-send') {
+      renderPrintAndSendTab(evaluation);
+    }
   }
 
   function triggerDownload(blob, filename) {
@@ -1629,6 +2036,73 @@
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function exportBackupJson() {
+    const payload = {
+      version: 4,
+      exportedAt: new Date().toISOString(),
+      companyName: state.companyName,
+      year: state.year,
+      month: state.month,
+      workers: state.workers,
+      schedulesByMonth: state.schedulesByMonth,
+      options: state.options
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const dateTag = new Date().toISOString().slice(0, 10);
+    triggerDownload(blob, `Backup_Orari_Turni_${dateTag}.json`);
+    showToast('Backup completo (.json) esportato.');
+  }
+
+  function handleBackupImport(inputEl) {
+    const file = inputEl.files && inputEl.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const parsed = JSON.parse(String(reader.result || ''));
+        if (!parsed || !Array.isArray(parsed.workers) || typeof parsed.schedulesByMonth !== 'object') {
+          showToast('File di backup non valido.');
+          inputEl.value = '';
+          return;
+        }
+        const ok = await askConfirm(
+          'Ripristina backup',
+          `Vuoi sostituire i dati attuali con il backup (${parsed.workers.length} operai)? Potrai comunque annullare subito dopo con "Annulla".`,
+          'Ripristina backup'
+        );
+        if (!ok) {
+          inputEl.value = '';
+          return;
+        }
+        pushUndoSnapshot();
+        if (typeof parsed.companyName === 'string') state.companyName = parsed.companyName;
+        if (typeof parsed.year === 'number') state.year = parsed.year;
+        if (typeof parsed.month === 'number') state.month = parsed.month;
+        state.workers = parsed.workers.map(makeWorker);
+        state.schedulesByMonth = parsed.schedulesByMonth || {};
+        if (parsed.options && typeof parsed.options === 'object') {
+          state.options = {
+            avoidSameShiftConsecutive: parsed.options.avoidSameShiftConsecutive !== false,
+            avoidLateToEarly: parsed.options.avoidLateToEarly !== false,
+            useItalianHolidays: parsed.options.useItalianHolidays !== false
+          };
+        }
+        state.highlightedWorkerId = null;
+        state.sendWorkerId = null;
+        state.printWorkerId = 'ALL';
+        state.sendCustomMessageDirty = false;
+        saveState();
+        renderAll();
+        showToast(`Backup ripristinato con ${state.workers.length} operai.`);
+      } catch (_e) {
+        showToast('Errore nella lettura del file JSON.');
+      } finally {
+        inputEl.value = '';
+      }
+    };
+    reader.readAsText(file, 'utf-8');
   }
 
   // Event listeners
@@ -1651,6 +2125,8 @@
   el.openCompanyTabBtn.addEventListener('click', () => setActiveTab('company'));
   el.openCreateTabBtn.addEventListener('click', () => setActiveTab('create'));
   el.createGoCompanyBtn.addEventListener('click', () => setActiveTab('company'));
+
+  el.undoBtn.addEventListener('click', undoLastAction);
 
   function changePeriod(newMonth, newYear) {
     state.month = newMonth;
@@ -1677,20 +2153,35 @@
   });
 
   el.createSelectAllBtn.addEventListener('click', () => {
-    state.workers.forEach((w) => {
-      w.active = true;
-    });
+    pushUndoSnapshot();
+    const store = getCurrentMonthStore();
+    store.excludedWorkerIds = [];
     saveState();
     renderAll();
   });
 
   el.createSelectNoneBtn.addEventListener('click', () => {
-    state.workers.forEach((w) => {
-      w.active = false;
-    });
+    pushUndoSnapshot();
+    const store = getCurrentMonthStore();
+    store.excludedWorkerIds = state.workers.map((w) => w.id);
     state.highlightedWorkerId = null;
     saveState();
     renderAll();
+  });
+
+  el.unavailWorkerSelect.addEventListener('change', () => {
+    state.unavailSelectedWorkerId = el.unavailWorkerSelect.value;
+    renderAll();
+  });
+
+  el.clearWorkerUnavailBtn.addEventListener('click', () => {
+    const store = getCurrentMonthStore();
+    if (!state.unavailSelectedWorkerId || !store.unavailability[state.unavailSelectedWorkerId]) return;
+    pushUndoSnapshot();
+    delete store.unavailability[state.unavailSelectedWorkerId];
+    saveState();
+    renderAll();
+    showToast('Assenze azzerate per l’operaio selezionato.');
   });
 
   el.createAvoidSameShiftOpt.addEventListener('change', () => {
@@ -1705,11 +2196,19 @@
     renderPeriodControls();
   });
 
+  el.createUseItalianHolidaysOpt.addEventListener('change', () => {
+    pushUndoSnapshot();
+    state.options.useItalianHolidays = el.createUseItalianHolidaysOpt.checked;
+    saveState();
+    renderAll();
+  });
+
   el.createGenerateAllBtn.addEventListener('click', () => {
+    pushUndoSnapshot();
     if (el.createResetLocksOpt.checked) {
       getCurrentMonthStore().locks = {};
     }
-    runGeneration();
+    runGeneration({ recordUndo: false });
     setActiveTab('schedule');
     showToast(
       `Turni di ${Scheduler.MONTH_NAMES_IT[state.month]} ${state.year} generati in automatico!`
@@ -1725,10 +2224,11 @@
     e.preventDefault();
     const name = el.workerNameInput.value.trim();
     if (!name) return;
+    pushUndoSnapshot();
     state.workers.push(makeWorker(name));
     el.workerNameInput.value = '';
     saveState();
-    runGeneration();
+    runGeneration({ recordUndo: false });
   });
 
   el.companyNameInput.addEventListener('input', () => {
@@ -1749,6 +2249,7 @@
     e.preventDefault();
     const name = el.newWorkerName.value.trim();
     if (!name) return;
+    pushUndoSnapshot();
     const worker = makeWorker({
       name,
       role: el.newWorkerRole.value,
@@ -1762,7 +2263,7 @@
     el.newWorkerEmail.value = '';
     el.newWorkerPhone.value = '';
     saveState();
-    runGeneration();
+    runGeneration({ recordUndo: false });
     showToast(`Aggiunto ${worker.name} alla lista azienda.`);
   });
 
@@ -1791,18 +2292,25 @@
       .filter((w) => w.name.length > 0);
   }
 
-  el.bulkReplaceBtn.addEventListener('click', () => {
+  el.bulkReplaceBtn.addEventListener('click', async () => {
     const list = parseBulkEntries(el.bulkTextarea.value);
     if (list.length === 0) {
       showToast('Inserisci almeno un nome.');
       return;
     }
+    const ok = await askConfirm(
+      'Sostituisci lista azienda',
+      `Vuoi sostituire l’intera lista attuale con i ${list.length} nuovi operai?`,
+      'Sostituisci lista'
+    );
+    if (!ok) return;
+    pushUndoSnapshot();
     state.workers = list;
     getCurrentMonthStore().locks = {};
     state.highlightedWorkerId = null;
     state.sendWorkerId = null;
     el.bulkPanel.classList.add('hidden');
-    runGeneration();
+    runGeneration({ recordUndo: false });
     showToast(`Lista azienda aggiornata con ${list.length} operai.`);
   });
 
@@ -1812,14 +2320,22 @@
       showToast('Inserisci almeno un nome.');
       return;
     }
+    pushUndoSnapshot();
     state.workers = state.workers.concat(list);
     el.bulkPanel.classList.add('hidden');
-    runGeneration();
+    runGeneration({ recordUndo: false });
     showToast(`Aggiunti ${list.length} operai alla lista azienda.`);
   });
 
-  el.quickGenBtn.addEventListener('click', () => {
+  el.quickGenBtn.addEventListener('click', async () => {
     const count = Math.max(1, Math.min(40, Number(el.quickCountInput.value) || 5));
+    const ok = await askConfirm(
+      'Crea operai di test',
+      `Questa azione sostituirà gli operai attuali con ${count} operai di test ("Operaio 1..${count}"). Vuoi continuare?`,
+      `Crea ${count} operai`
+    );
+    if (!ok) return;
+    pushUndoSnapshot();
     const list = [];
     for (let i = 1; i <= count; i++) {
       list.push(makeWorker({ name: `Operaio ${i}`, role: 'Operaio' }));
@@ -1828,20 +2344,35 @@
     getCurrentMonthStore().locks = {};
     state.highlightedWorkerId = null;
     state.sendWorkerId = null;
-    runGeneration();
+    runGeneration({ recordUndo: false });
     showToast(`Creati ${count} operai e generato l'orario.`);
   });
 
-  el.resetDemoBtn.addEventListener('click', () => {
+  el.resetDemoBtn.addEventListener('click', async () => {
+    const ok = await askConfirm(
+      'Ripristina operai predefiniti',
+      'Vuoi sostituire la lista corrente con i 5 operai predefiniti?',
+      'Ripristina'
+    );
+    if (!ok) return;
+    pushUndoSnapshot();
     state.workers = DEFAULT_WORKERS.map(makeWorker);
     getCurrentMonthStore().locks = {};
     state.highlightedWorkerId = null;
     state.sendWorkerId = null;
-    runGeneration();
+    runGeneration({ recordUndo: false });
     showToast('Ripristinati i 5 operai predefiniti.');
   });
 
-  el.clearWorkersBtn.addEventListener('click', () => {
+  el.clearWorkersBtn.addEventListener('click', async () => {
+    if (state.workers.length === 0) return;
+    const ok = await askConfirm(
+      'Svuota lista operai',
+      'Sei sicuro di voler rimuovere tutti gli operai dall’anagrafica e svuotare i turni del mese corrente?',
+      'Svuota lista'
+    );
+    if (!ok) return;
+    pushUndoSnapshot();
     state.workers = [];
     getCurrentMonthStore().assignments = {};
     getCurrentMonthStore().locks = {};
@@ -1864,7 +2395,15 @@
     renderPeriodControls();
   });
 
+  el.useItalianHolidaysOpt.addEventListener('change', () => {
+    pushUndoSnapshot();
+    state.options.useItalianHolidays = el.useItalianHolidaysOpt.checked;
+    saveState();
+    renderAll();
+  });
+
   el.clearLocksBtn.addEventListener('click', () => {
+    pushUndoSnapshot();
     getCurrentMonthStore().locks = {};
     saveState();
     renderAll();
@@ -1875,6 +2414,11 @@
     state.highlightedWorkerId = null;
     renderAll();
   });
+
+  el.exportBackupBtn.addEventListener('click', exportBackupJson);
+  el.companyExportBackupBtn.addEventListener('click', exportBackupJson);
+  el.importBackupInput.addEventListener('change', () => handleBackupImport(el.importBackupInput));
+  el.companyImportBackupInput.addEventListener('change', () => handleBackupImport(el.companyImportBackupInput));
 
   el.exportCsvBtn.addEventListener('click', () => {
     const { calendar, store } = getCurrentEvaluation();
@@ -1908,6 +2452,7 @@
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
+      pushUndoSnapshot();
       const parsed = Exporter.parseCsvTemplate(reader.result, Scheduler.MONTH_NAMES_IT);
       const msgParts = [];
       if (parsed.detectedMonth !== null) {
@@ -1919,7 +2464,7 @@
         msgParts.push(`importati ${parsed.workerNames.length} operai`);
       }
       getCurrentMonthStore().locks = {};
-      runGeneration();
+      runGeneration({ recordUndo: false });
       showToast(
         msgParts.length > 0
           ? 'CSV importato: ' + msgParts.join(', ') + '.'
@@ -2047,6 +2592,22 @@
     showToast(`Apertura WhatsApp per ${w.name}...`);
   });
 
+  el.downloadIcsBtn.addEventListener('click', () => {
+    const w = state.workers.find((x) => x.id === state.sendWorkerId);
+    if (!w) return;
+    const { calendar, store } = getCurrentEvaluation();
+    const ics = Messaging.buildWorkerIcs({
+      companyName: state.companyName,
+      calendar,
+      worker: w,
+      assignments: store.assignments
+    });
+    const blob = new Blob([ics], { type: 'text/calendar;charset=utf-8;' });
+    const safeName = w.name.replace(/[^a-zA-Z0-9_-]+/g, '_');
+    triggerDownload(blob, `Turni_${safeName}_${calendar.monthName}_${calendar.year}.ics`);
+    showToast(`Calendario (.ics) scaricato per ${w.name}.`);
+  });
+
   el.copyMessageBtn.addEventListener('click', async () => {
     const text = el.sendMessageTextarea.value;
     if (!text) return;
@@ -2064,7 +2625,7 @@
   const restored = loadState();
   const currentStore = getCurrentMonthStore();
   if (!restored || Object.keys(currentStore.assignments).length === 0) {
-    runGeneration();
+    runGeneration({ recordUndo: false });
   } else {
     renderAll();
   }

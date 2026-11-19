@@ -12,7 +12,7 @@
       <div class="brand-icon" aria-hidden="true">📅</div>
       <div>
         <h1>Generatore Orario Turni</h1>
-        <p class="subtitle">Lun–Ven: 3 turni (06-08, 14-16, 16-20) · Sabato: 2 turni (06-13, 13-20) · Domenica: Festa</p>
+        <p class="subtitle">Lun–Ven: 3 turni (06-08, 14-16, 16-20) · Sabato: 2 turni (06-13, 13-20) · Domenica &amp; Festivi: Chiuso</p>
       </div>
     </div>
 
@@ -33,6 +33,9 @@
         <select id="yearSelect"></select>
       </div>
 
+      <button id="undoBtn" class="btn btn-ghost" type="button" disabled title="Annulla l'ultima modifica o generazione">
+        ↩️ Annulla
+      </button>
       <button id="generateBtn" class="btn btn-primary" type="button">
         🎲 Genera Orario
       </button>
@@ -73,7 +76,7 @@
         <div>
           <h2>✨ Crea Turni Mensili in Automatico</h2>
           <p class="card-sub">
-            Scegli il mese e l'anno dai menù a tendina, seleziona gli operai disponibili e genera tutti i turni del mese.
+            Scegli il mese e l'anno dai menù a tendina, imposta disponibilità, festività e ferie, poi genera tutti i turni del mese.
           </p>
         </div>
       </div>
@@ -104,6 +107,10 @@
             <span>Evita chiusura → apertura (16-20 → 06-08)</span>
           </label>
           <label class="checkbox-row">
+            <input id="createUseItalianHolidaysOpt" type="checkbox" checked />
+            <span>Festività nazionali italiane automatiche (chiuso)</span>
+          </label>
+          <label class="checkbox-row">
             <input id="createResetLocksOpt" type="checkbox" />
             <span>Ignora eventuali turni bloccati (rigenera tutto il mese)</span>
           </label>
@@ -112,8 +119,8 @@
         <div class="create-step-box">
           <div class="create-workers-header">
             <div>
-              <h3>2. Operai disponibili per il mese (<span id="createSelectedCount">0</span>/<span id="createTotalCount">0</span>)</h3>
-              <p class="card-sub">Spunta gli operai da inserire nei turni del mese selezionato.</p>
+              <h3>2. Operai disponibili nel mese (<span id="createSelectedCount">0</span>/<span id="createTotalCount">0</span>)</h3>
+              <p class="card-sub">La spunta vale solo per il mese selezionato (non esclude l'operaio dagli altri mesi).</p>
             </div>
             <div class="header-mini-actions">
               <button id="createSelectAllBtn" class="btn btn-ghost btn-xs" type="button">Seleziona tutti</button>
@@ -131,6 +138,33 @@
         </div>
       </div>
 
+      <div class="create-grid" style="margin-top: 16px;">
+        <div class="create-step-box">
+          <div class="create-workers-header">
+            <div>
+              <h3>4. Festività &amp; Chiusure extra del mese</h3>
+              <p class="card-sub">Clicca su un giorno per segnarlo come Festivo/Chiuso o per riaprirlo.</p>
+            </div>
+          </div>
+          <div id="createHolidaysGrid" class="mini-day-grid"></div>
+        </div>
+
+        <div class="create-step-box">
+          <div class="create-workers-header">
+            <div>
+              <h3>5. Ferie &amp; Indisponibilità giornaliere</h3>
+              <p class="card-sub">Seleziona un operaio e clicca i giorni in cui è assente o in ferie.</p>
+            </div>
+            <button id="clearWorkerUnavailBtn" class="btn btn-ghost btn-xs" type="button">Pulisci assenze</button>
+          </div>
+          <div class="field-group" style="margin-bottom: 10px;">
+            <select id="unavailWorkerSelect"></select>
+          </div>
+          <div id="unavailDayGrid" class="mini-day-grid"></div>
+          <div id="unavailSummaryList" class="unavail-summary-list"></div>
+        </div>
+      </div>
+
       <div class="create-submit-bar">
         <button id="createGenerateAllBtn" class="btn btn-primary btn-lg" type="button">
           🎲 Genera in automatico tutti i turni del mese
@@ -145,7 +179,7 @@
       <section class="card">
         <div class="card-header">
           <div>
-            <h2>Operai attivi (<span id="activeWorkerCount">0</span>)</h2>
+            <h2>Operai del mese (<span id="activeWorkerCount">0</span>)</h2>
             <p class="card-sub" id="sidebarCompanyLabel"></p>
           </div>
           <div class="header-mini-actions">
@@ -173,13 +207,13 @@
 
         <div id="workerList" class="worker-list"></div>
         <p class="hint">
-          Spunta = considerato per i turni. Clicca il nome per evidenziare i turni, ✏️ per modificare, × per eliminare.
+          Spunta = partecipa ai turni di questo mese. Clicca il nome per evidenziare i turni, ✏️ per modificare, × per eliminare.
         </p>
       </section>
 
       <section class="card">
         <div class="card-header">
-          <h2>Regole &amp; Modello</h2>
+          <h2>Regole &amp; Backup</h2>
         </div>
 
         <label class="checkbox-row">
@@ -192,6 +226,11 @@
           <span>Evita chiusura → apertura (16-20 → 06-08)</span>
         </label>
 
+        <label class="checkbox-row">
+          <input id="useItalianHolidaysOpt" type="checkbox" checked />
+          <span>Festività nazionali italiane automatiche</span>
+        </label>
+
         <div class="divider"></div>
 
         <div class="import-row">
@@ -200,6 +239,11 @@
             <input id="importCsvInput" type="file" accept=".csv,.txt" hidden />
           </label>
           <button id="clearLocksBtn" class="btn btn-ghost btn-sm" type="button">🔓 Sblocca tutto</button>
+          <button id="exportBackupBtn" class="btn btn-ghost btn-sm" type="button">💾 Backup JSON</button>
+          <label class="btn btn-ghost btn-sm file-label">
+            📂 Ripristina JSON
+            <input id="importBackupInput" type="file" accept=".json,application/json" hidden />
+          </label>
         </div>
       </section>
     </aside>
@@ -213,11 +257,11 @@
           <div>
             <h2 id="scheduleTitle">Orario mese: Novembre 2026</h2>
             <p class="card-sub">
-              Modifica manualmente qualsiasi turno dal menu a tendina (mostra gli operai disponibili) o clicca 🔒 per fissarlo.
+              Modifica qualsiasi turno dal menu a tendina, clicca 🔒 per fissarlo o 🎉 nella colonna giorno per segnare una festività.
             </p>
           </div>
           <div class="header-mini-actions">
-            <button id="openCreateTabBtn" class="btn btn-ghost btn-sm" type="button">✨ Crea turni</button>
+            <button id="openCreateTabBtn" class="btn btn-ghost btn-sm" type="button">✨ Crea turni / Ferie</button>
             <div id="highlightBanner" class="highlight-banner hidden">
               <span>Evidenziato: <strong id="highlightName"></strong></span>
               <button id="clearHighlightBtn" class="link-btn" type="button">Mostra tutti</button>
@@ -283,6 +327,11 @@
         </div>
         <div class="header-mini-actions">
           <button id="toggleBulkBtn" class="btn btn-ghost btn-sm" type="button">📋 Incolla lista nomi</button>
+          <button id="companyExportBackupBtn" class="btn btn-ghost btn-sm" type="button">💾 Esporta Backup</button>
+          <label class="btn btn-ghost btn-sm file-label">
+            📂 Ripristina Backup
+            <input id="companyImportBackupInput" type="file" accept=".json,application/json" hidden />
+          </label>
           <button id="resetDemoBtn" class="btn btn-ghost btn-sm" type="button">Ripristina predefiniti</button>
           <button id="clearWorkersBtn" class="btn btn-ghost btn-sm" type="button">Svuota lista</button>
         </div>
@@ -384,7 +433,7 @@
           </div>
           <label class="checkbox-row" style="margin-top: 8px;">
             <input id="printIncludeAllDaysOpt" type="checkbox" checked />
-            <span>Mostra calendario completo del mese (inclusi giorni di riposo e domenica festa)</span>
+            <span>Mostra calendario completo del mese (inclusi giorni di riposo e festivi)</span>
           </label>
         </div>
 
@@ -398,7 +447,7 @@
         <div class="card-header">
           <div>
             <h2>📤 Invia Turno al Dipendente</h2>
-            <p class="card-sub">Invia i turni del mese selezionato tramite Email o WhatsApp.</p>
+            <p class="card-sub">Invia i turni del mese selezionato tramite Email, WhatsApp o file Calendario (.ics).</p>
           </div>
         </div>
 
@@ -429,6 +478,7 @@
         <div class="send-actions">
           <button id="sendEmailBtn" class="btn btn-primary" type="button">✉️ Invia via Email</button>
           <button id="sendWhatsAppBtn" class="btn btn-secondary" type="button">💬 Invia via WhatsApp</button>
+          <button id="downloadIcsBtn" class="btn btn-ghost" type="button">📆 Calendario (.ics)</button>
           <button id="copyMessageBtn" class="btn btn-ghost" type="button">📋 Copia testo</button>
         </div>
 
@@ -438,6 +488,18 @@
       </section>
     </div>
   </section>
+
+  <!-- In-app confirmation modal (replaces native confirm) -->
+  <div id="confirmModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="confirmModalTitle">
+    <div class="modal-card">
+      <h3 id="confirmModalTitle">Conferma operazione</h3>
+      <p id="confirmModalBody"></p>
+      <div class="modal-actions">
+        <button id="confirmCancelBtn" class="btn btn-ghost" type="button">Annulla</button>
+        <button id="confirmOkBtn" class="btn btn-primary" type="button">Conferma</button>
+      </div>
+    </div>
+  </div>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 

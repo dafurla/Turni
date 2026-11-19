@@ -26,6 +26,129 @@
   };
 
   /**
+   * Computes Easter Sunday (Gregorian calendar) for a given year.
+   */
+  function getEasterSunday(year) {
+    const a = year % 19;
+    const b = Math.floor(year / 100);
+    const c = year % 100;
+    const d = Math.floor(b / 4);
+    const e = b % 4;
+    const f = Math.floor((b + 8) / 25);
+    const g = Math.floor((b - f + 1) / 3);
+    const h = (19 * a + b - d - g + 15) % 30;
+    const i = Math.floor(c / 4);
+    const k = c % 4;
+    const l = (32 + 2 * e + 2 * i - h - k) % 7;
+    const m = Math.floor((a + 11 * h + 22 * l) / 451);
+    const month = Math.floor((h + l - 7 * m + 114) / 31) - 1; // 0-based
+    const day = ((h + l - 7 * m + 114) % 31) + 1;
+    return new Date(year, month, day);
+  }
+
+  /**
+   * Returns Italian national public holidays for a given year and 0-based month.
+   * Map<dayNumber, holidayName>
+   */
+  function getItalianHolidaysForMonth(year, month) {
+    const map = new Map();
+    const fixed = [
+      [0, 1, 'Capodanno'],
+      [0, 6, 'Epifania'],
+      [3, 25, 'Festa della Liberazione'],
+      [4, 1, 'Festa dei Lavoratori'],
+      [5, 2, 'Festa della Repubblica'],
+      [7, 15, 'Ferragosto'],
+      [10, 1, 'Tutti i Santi'],
+      [11, 8, 'Immacolata Concezione'],
+      [11, 25, 'Natale'],
+      [11, 26, 'Santo Stefano']
+    ];
+
+    for (const [m, d, name] of fixed) {
+      if (m === month) map.set(d, name);
+    }
+
+    const easter = getEasterSunday(year);
+    const easterMonday = new Date(easter.getFullYear(), easter.getMonth(), easter.getDate() + 1);
+    if (easter.getMonth() === month) {
+      map.set(easter.getDate(), 'Pasqua');
+    }
+    if (easterMonday.getMonth() === month) {
+      map.set(easterMonday.getDate(), "Lunedì dell'Angelo (Pasquetta)");
+    }
+
+    return map;
+  }
+
+  /**
+   * Normalizes holiday configuration into a Map<day, label>.
+   */
+  function resolveHolidayMap(year, month, options = {}) {
+    const map = new Map();
+    if (options.useItalianHolidays) {
+      for (const [day, name] of getItalianHolidaysForMonth(year, month)) {
+        map.set(day, name);
+      }
+    }
+
+    const custom = options.holidays;
+    if (custom instanceof Map) {
+      for (const [day, name] of custom.entries()) {
+        map.set(Number(day), name || 'Festivo');
+      }
+    } else if (custom instanceof Set) {
+      for (const day of custom) {
+        if (!map.has(Number(day))) map.set(Number(day), 'Festivo');
+      }
+    } else if (Array.isArray(custom)) {
+      for (const day of custom) {
+        if (!map.has(Number(day))) map.set(Number(day), 'Festivo');
+      }
+    } else if (custom && typeof custom === 'object') {
+      for (const [dayStr, name] of Object.entries(custom)) {
+        const d = Number(dayStr);
+        if (name) map.set(d, typeof name === 'string' ? name : 'Festivo');
+      }
+    }
+
+    if (options.openHolidays) {
+      const openList = options.openHolidays instanceof Set
+        ? Array.from(options.openHolidays)
+        : Array.isArray(options.openHolidays)
+          ? options.openHolidays
+          : [];
+      for (const day of openList) {
+        map.delete(Number(day));
+      }
+    }
+
+    return map;
+  }
+
+  /**
+   * Normalizes unavailability map: workerId -> Set<dayNumber>.
+   */
+  function normalizeUnavailability(unavailability) {
+    const result = new Map();
+    if (!unavailability) return result;
+    const entries = unavailability instanceof Map
+      ? Array.from(unavailability.entries())
+      : Object.entries(unavailability);
+    for (const [workerId, days] of entries) {
+      const set = new Set();
+      if (days instanceof Set || Array.isArray(days)) {
+        for (const d of days) {
+          const num = Number(d);
+          if (Number.isFinite(num) && num >= 1 && num <= 31) set.add(num);
+        }
+      }
+      if (set.size > 0) result.set(workerId, set);
+    }
+    return result;
+  }
+
+  /**
    * Returns a shuffled copy of an array using Fisher-Yates.
    */
   function shuffle(array, rng) {
@@ -43,8 +166,9 @@
    * Builds the calendar skeleton for a given year and 0-based month (0..11).
    * Groups days into Monday-Sunday weeks.
    */
-  function buildMonthCalendar(year, month) {
+  function buildMonthCalendar(year, month, options = {}) {
     const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const holidayMap = resolveHolidayMap(year, month, options);
     const days = [];
     let currentWeekIndex = 0;
 
@@ -59,19 +183,24 @@
 
       const isSunday = dow === 0;
       const isSaturday = dow === 6;
+      const holidayName = holidayMap.get(dayNum) || null;
+      const isHoliday = Boolean(holidayName);
+      const isClosed = isSunday || isHoliday;
 
       let slots = [];
-      if (isSaturday) {
-        slots = [
-          { slotKey: 'sat_1', ...SHIFT_DEFS.sat_1 },
-          { slotKey: 'sat_2', ...SHIFT_DEFS.sat_2 }
-        ];
-      } else if (!isSunday) {
-        slots = [
-          { slotKey: 'mf_1', ...SHIFT_DEFS.mf_1 },
-          { slotKey: 'mf_2', ...SHIFT_DEFS.mf_2 },
-          { slotKey: 'mf_3', ...SHIFT_DEFS.mf_3 }
-        ];
+      if (!isClosed) {
+        if (isSaturday) {
+          slots = [
+            { slotKey: 'sat_1', ...SHIFT_DEFS.sat_1 },
+            { slotKey: 'sat_2', ...SHIFT_DEFS.sat_2 }
+          ];
+        } else {
+          slots = [
+            { slotKey: 'mf_1', ...SHIFT_DEFS.mf_1 },
+            { slotKey: 'mf_2', ...SHIFT_DEFS.mf_2 },
+            { slotKey: 'mf_3', ...SHIFT_DEFS.mf_3 }
+          ];
+        }
       }
 
       days.push({
@@ -82,6 +211,9 @@
         weekIndex: currentWeekIndex,
         isSunday,
         isSaturday,
+        isHoliday,
+        holidayName,
+        isClosed,
         slots
       });
     }
@@ -119,6 +251,14 @@
     };
   }
 
+  function isLateSlot(slotKey) {
+    return slotKey === 'mf_3' || slotKey === 'sat_2';
+  }
+
+  function isEarlySlot(slotKey) {
+    return slotKey === 'mf_1' || slotKey === 'sat_1';
+  }
+
   /**
    * Generates a randomized, fair, non-repetitive schedule for the given workers and month.
    *
@@ -127,6 +267,9 @@
    * @param {number} params.month - 0-based (0=Jan, 10=Nov)
    * @param {Array<{id: string, name: string}>} params.workers - Active workers
    * @param {Object} [params.locks] - Optional locked assignments keyed by `${day}:${slotKey}` -> workerId
+   * @param {Object} [params.unavailability] - Optional workerId -> number[]|Set<number> of unavailable day numbers
+   * @param {Object} [params.prevDayAssignments] - Optional `{ [slotKey]: workerId }` from the previous month's last day
+   * @param {Object} [params.calendarOptions] - Optional holiday config passed to buildMonthCalendar
    * @param {Object} [params.options]
    * @param {boolean} [params.options.avoidSameShiftConsecutive=true]
    * @param {boolean} [params.options.avoidLateToEarly=true]
@@ -138,6 +281,9 @@
       month,
       workers,
       locks = {},
+      unavailability = {},
+      prevDayAssignments = null,
+      calendarOptions = {},
       options = {},
       rng = Math.random
     } = params;
@@ -145,17 +291,25 @@
     const avoidSameShiftConsecutive = options.avoidSameShiftConsecutive !== false;
     const avoidLateToEarly = options.avoidLateToEarly !== false;
 
-    const calendar = buildMonthCalendar(year, month);
+    const calendar = buildMonthCalendar(year, month, calendarOptions);
     const activeWorkers = (workers || []).filter((w) => w && w.id && w.name && w.active !== false);
     const workerIds = activeWorkers.map((w) => w.id);
     const workerMap = new Map(activeWorkers.map((w) => [w.id, w]));
+    const unavailMap = normalizeUnavailability(unavailability);
+
+    const isWorkerAvailableOnDay = (workerId, dayNum) => {
+      const set = unavailMap.get(workerId);
+      return !set || !set.has(dayNum);
+    };
 
     const warnings = [];
     if (activeWorkers.length === 0) {
       const emptyValidation = validateAndSummarize({
         calendar,
         workers: [],
-        assignments: {}
+        assignments: {},
+        unavailability,
+        prevDayAssignments
       });
       return {
         calendar,
@@ -194,6 +348,18 @@
     const dayAssigned = new Map(); // day -> Set(workerId)
     const workerLastDay = new Map(workerIds.map((id) => [id, -99]));
     const workerLastSlot = new Map(workerIds.map((id) => [id, null]));
+
+    // Seed previous month's last day (day 0 relative to day 1) for cross-month continuity
+    const prevDaySlotByWorker = new Map();
+    if (prevDayAssignments && typeof prevDayAssignments === 'object') {
+      for (const [slotKey, wId] of Object.entries(prevDayAssignments)) {
+        if (wId && workerMap.has(wId)) {
+          workerLastDay.set(wId, 0);
+          workerLastSlot.set(wId, slotKey);
+          prevDaySlotByWorker.set(wId, slotKey);
+        }
+      }
+    }
 
     let totalMonthHours = 0;
     for (const dayObj of calendar.days) {
@@ -255,14 +421,16 @@
         const { dayObj, slot, key } = item;
         const assignedToday = dayAssigned.get(dayObj.day);
 
-        // Eligible workers = not already working today
-        const eligible = workerIds.filter((id) => !assignedToday.has(id));
+        // Eligible workers = not already working today AND available on this day
+        const eligible = workerIds.filter(
+          (id) => !assignedToday.has(id) && isWorkerAvailableOnDay(id, dayObj.day)
+        );
         if (eligible.length === 0) {
           assignments[key] = null;
           continue;
         }
 
-        // Hard priority: ensure every worker gets at least 1 shift this week before
+        // Hard priority: ensure every available worker gets at least 1 shift this week before
         // anyone gets a second shift in the same week
         const zeroWeekEligible = eligible.filter((id) => weekCount.get(id) === 0);
         const candidatePool = zeroWeekEligible.length > 0 ? zeroWeekEligible : eligible;
@@ -280,7 +448,6 @@
           if (wShifts === 0) {
             score -= 1000000;
           } else {
-            // Balance shifts within the week
             score += wShifts * 60000;
           }
 
@@ -295,7 +462,7 @@
           // 4. Non-repetition: balance specific shift slot type (mf_1, mf_2, mf_3, sat_1, sat_2)
           score += sCounts[slot.slotKey] * 1800;
 
-          // 4. Avoid repeating the same shift type on consecutive working days
+          // 5. Avoid repeating the same shift type on consecutive working days
           const prevDay = workerLastDay.get(id);
           const prevSlot = workerLastSlot.get(id);
           const dayDiff = dayObj.day - prevDay;
@@ -304,22 +471,22 @@
             score += dayDiff === 1 ? 600 : 250;
           }
 
-          // 5. Avoid late shift (16:00-20:00 or Sat 13:00-20:00) followed next day by early 06:00
+          // 6. Avoid late shift (16:00-20:00 or Sat 13:00-20:00) followed next day by early 06:00
           if (
             avoidLateToEarly &&
             dayDiff === 1 &&
-            (prevSlot === 'mf_3' || prevSlot === 'sat_2') &&
-            (slot.slotKey === 'mf_1' || slot.slotKey === 'sat_1')
+            isLateSlot(prevSlot) &&
+            isEarlySlot(slot.slotKey)
           ) {
             score += 400;
           }
 
-          // 6. Mild preference against working yesterday to spread rest days naturally
+          // 7. Mild preference against working yesterday to spread rest days naturally
           if (dayDiff === 1) {
             score += 80;
           }
 
-          // 7. Random tie-breaker so schedules vary randomly each generation
+          // 8. Random tie-breaker so schedules vary randomly each generation
           score += rng() * 50;
 
           return { id, score };
@@ -339,14 +506,26 @@
       }
 
       // Local optimization pass within the week to further reduce consecutive-same-shift
-      // and slot-type imbalance without breaking daily uniqueness or weekly >= 1
-      optimizeWeekSwaps(week, assignments, locks, avoidSameShiftConsecutive, avoidLateToEarly);
+      // and slot-type imbalance without breaking daily uniqueness, availability, or weekly >= 1
+      optimizeWeekSwaps(
+        week,
+        assignments,
+        locks,
+        unavailMap,
+        avoidSameShiftConsecutive,
+        avoidLateToEarly
+      );
 
       // Resynchronize slotTypeCount, workerLastDay, and workerLastSlot after week swaps
       for (const id of workerIds) {
         slotTypeCount.set(id, { mf_1: 0, mf_2: 0, mf_3: 0, sat_1: 0, sat_2: 0 });
-        workerLastDay.set(id, -99);
-        workerLastSlot.set(id, null);
+        if (prevDaySlotByWorker.has(id)) {
+          workerLastDay.set(id, 0);
+          workerLastSlot.set(id, prevDaySlotByWorker.get(id));
+        } else {
+          workerLastDay.set(id, -99);
+          workerLastSlot.set(id, null);
+        }
       }
       for (const d of calendar.days) {
         if (d.day > week.endDay) break;
@@ -362,13 +541,15 @@
     }
 
     // Global monthly hours equalization pass: keeps maxHours - minHours as close to 0..2h as possible
-    // while preserving daily uniqueness, weekly >= 1 shift, and locks.
+    // while preserving daily uniqueness, availability, weekly >= 1 shift, transitions, and locks.
     if (workerIds.length >= 3) {
       balanceMonthlyHours({
         calendar,
         workerIds,
         assignments,
         locks,
+        unavailMap,
+        prevDaySlotByWorker,
         targetMonthlyHours,
         avoidSameShiftConsecutive,
         avoidLateToEarly,
@@ -379,7 +560,9 @@
     const validation = validateAndSummarize({
       calendar,
       workers: activeWorkers,
-      assignments
+      assignments,
+      unavailability,
+      prevDayAssignments
     });
 
     return {
@@ -393,11 +576,10 @@
   }
 
   /**
-   * Attempts pairwise swaps within the same week (between unlocked slots of the same day type)
-   * when it strictly improves shift-type variety or avoids back-to-back identical shifts.
+   * Attempts pairwise swaps within the same week (between unlocked slots of equal duration)
+   * when it strictly improves shift-type variety or avoids back-to-back identical / late->early shifts.
    */
-  function optimizeWeekSwaps(week, assignments, locks, avoidSameShiftConsecutive, avoidLateToEarly) {
-    // Collect unlocked slots in this week
+  function optimizeWeekSwaps(week, assignments, locks, unavailMap, avoidSameShiftConsecutive, avoidLateToEarly) {
     const unlocked = [];
     for (const dayObj of week.days) {
       for (const slot of dayObj.slots) {
@@ -409,6 +591,11 @@
     }
 
     if (unlocked.length < 2) return;
+
+    const isAvail = (wId, day) => {
+      const set = unavailMap.get(wId);
+      return !set || !set.has(day);
+    };
 
     const getDayWorkers = (day) => {
       const dayObj = week.days.find((d) => d.day === day);
@@ -445,11 +632,7 @@
               if (avoidSameShiftConsecutive && cur.slotKey === prev.slotKey) {
                 penalty += 60;
               }
-              if (
-                avoidLateToEarly &&
-                (prev.slotKey === 'mf_3' || prev.slotKey === 'sat_2') &&
-                (cur.slotKey === 'mf_1' || cur.slotKey === 'sat_1')
-              ) {
+              if (avoidLateToEarly && isLateSlot(prev.slotKey) && isEarlySlot(cur.slotKey)) {
                 penalty += 40;
               }
             }
@@ -474,15 +657,14 @@
           const wB = assignments[b.key];
           if (wA === wB) continue;
           if (a.slot.hours !== b.slot.hours) continue;
+          if (!isAvail(wB, a.dayObj.day) || !isAvail(wA, b.dayObj.day)) continue;
 
-          // Check daily uniqueness constraint if swapping across different days
           if (a.dayObj.day !== b.dayObj.day) {
             const workersDayA = getDayWorkers(a.dayObj.day);
             const workersDayB = getDayWorkers(b.dayObj.day);
             if (workersDayA.has(wB) || workersDayB.has(wA)) continue;
           }
 
-          // Try swap
           assignments[a.key] = wB;
           assignments[b.key] = wA;
           const nextPenalty = penaltyForWeek();
@@ -490,7 +672,6 @@
             currentPenalty = nextPenalty;
             improved = true;
           } else {
-            // Revert
             assignments[a.key] = wA;
             assignments[b.key] = wB;
           }
@@ -503,9 +684,21 @@
    * Global monthly hours equalization pass.
    * Performs valid transfers and swaps across the whole month so all workers finish
    * with nearly identical monthly hours (target spread <= 1-2h) while strictly
-   * preserving daily uniqueness, weekly >= 1 shift (when feasible), and user locks.
+   * preserving daily uniqueness, availability, weekly >= 1 shift (when feasible),
+   * consecutive transition preferences, and user locks.
    */
-  function balanceMonthlyHours({ calendar, workerIds, assignments, locks, targetMonthlyHours, rng }) {
+  function balanceMonthlyHours({
+    calendar,
+    workerIds,
+    assignments,
+    locks,
+    unavailMap,
+    prevDaySlotByWorker,
+    targetMonthlyHours,
+    avoidSameShiftConsecutive,
+    avoidLateToEarly,
+    rng
+  }) {
     const hoursByWorker = new Map(workerIds.map((id) => [id, 0]));
     const weekCountsByWorker = new Map(workerIds.map((id) => [id, calendar.weeks.map(() => 0)]));
     const slotCountsByWorker = new Map(
@@ -513,6 +706,11 @@
     );
     const dayWorkers = new Map();
     const unlockedSlots = [];
+
+    const isAvail = (wId, day) => {
+      const set = unavailMap.get(wId);
+      return !set || !set.has(day);
+    };
 
     for (const dayObj of calendar.days) {
       const set = new Set();
@@ -541,9 +739,60 @@
 
     if (unlockedSlots.length === 0) return;
 
-    const weekRequiresMinOne = calendar.weeks.map(
-      (w) => w.totalSlots >= workerIds.length && w.totalSlots > 0
-    );
+    // Check which workers actually have at least 1 available slot in each week
+    const weekRequiresMinOne = calendar.weeks.map((w) => {
+      if (w.totalSlots === 0 || w.totalSlots < workerIds.length) return false;
+      return true;
+    });
+
+    const canWorkerWorkWeek = (wId, week) => {
+      for (const d of week.days) {
+        if (d.slots.length > 0 && isAvail(wId, d.day)) return true;
+      }
+      return false;
+    };
+
+    const workerWeekRequired = new Map();
+    for (const id of workerIds) {
+      workerWeekRequired.set(
+        id,
+        calendar.weeks.map((w, idx) => weekRequiresMinOne[idx] && canWorkerWorkWeek(id, w))
+      );
+    }
+
+    const computeTransitionPenalty = () => {
+      if (!avoidSameShiftConsecutive && !avoidLateToEarly) return 0;
+      let penalty = 0;
+      const lastDay = new Map();
+      const lastSlot = new Map();
+
+      if (prevDaySlotByWorker) {
+        for (const [wId, slotKey] of prevDaySlotByWorker.entries()) {
+          lastDay.set(wId, 0);
+          lastSlot.set(wId, slotKey);
+        }
+      }
+
+      for (const dayObj of calendar.days) {
+        for (const slot of dayObj.slots) {
+          const wId = assignments[`${dayObj.day}:${slot.slotKey}`];
+          if (!wId) continue;
+          const prevD = lastDay.get(wId);
+          const prevS = lastSlot.get(wId);
+          if (prevD != null && dayObj.day - prevD === 1) {
+            if (avoidSameShiftConsecutive && prevS === slot.slotKey) {
+              penalty += 1;
+            }
+            if (avoidLateToEarly && isLateSlot(prevS) && isEarlySlot(slot.slotKey)) {
+              penalty += 2;
+            }
+          }
+          lastDay.set(wId, dayObj.day);
+          lastSlot.set(wId, slot.slotKey);
+        }
+      }
+      return penalty;
+    };
 
     const computeObjective = () => {
       let minH = Infinity;
@@ -568,14 +817,15 @@
       }
 
       const spread = maxH - minH;
+      const transPenalty = computeTransitionPenalty();
       return {
         spread,
-        score: spread * 1000000 + sqErr * 1000 + slotPenalty * 5
+        score: spread * 1000000 + sqErr * 1000 + transPenalty * 150 + slotPenalty * 5
       };
     };
 
     const canLeaveWeek = (workerId, weekIndex) => {
-      if (!weekRequiresMinOne[weekIndex]) return true;
+      if (!workerWeekRequired.get(workerId)[weekIndex]) return true;
       return weekCountsByWorker.get(workerId)[weekIndex] > 1;
     };
 
@@ -617,7 +867,7 @@
     for (let pass = 0; pass < 16; pass++) {
       let improved = false;
 
-      // 1. Try pairwise swaps (different durations or same-duration variety swaps)
+      // 1. Try pairwise swaps (different durations or same-duration variety/transition swaps)
       const shuffledSlots = shuffle(unlockedSlots, rng);
       for (let i = 0; i < shuffledSlots.length; i++) {
         const a = shuffledSlots[i];
@@ -626,7 +876,8 @@
           const b = shuffledSlots[j];
           const wB = assignments[b.key];
           if (wA === wB) continue;
-          if (a.hours === b.hours && a.slotKey === b.slotKey) continue;
+          if (!isAvail(wB, a.day) || !isAvail(wA, b.day)) continue;
+          if (a.hours === b.hours && a.slotKey === b.slotKey && a.day === b.day) continue;
           if (a.hours === b.hours && current.spread > 2) continue;
 
           if (a.day !== b.day) {
@@ -636,15 +887,13 @@
             if (!canLeaveWeek(wA, a.weekIndex) || !canLeaveWeek(wB, b.weekIndex)) continue;
           }
 
-          // Apply tentative swap
           swapSlots(a, b, wA, wB);
           const next = computeObjective();
           if (next.score < current.score - 1e-6) {
             current = next;
             improved = true;
-            break; // move on from slot a since wA changed
+            break;
           } else {
-            // Revert
             swapSlots(a, b, wB, wA);
           }
         }
@@ -659,7 +908,13 @@
 
           const giverHours = hoursByWorker.get(giver);
           const candidates = workerIds
-            .filter((id) => id !== giver && !dayWorkers.get(s.day).has(id) && hoursByWorker.get(id) < giverHours)
+            .filter(
+              (id) =>
+                id !== giver &&
+                isAvail(id, s.day) &&
+                !dayWorkers.get(s.day).has(id) &&
+                hoursByWorker.get(id) < giverHours
+            )
             .sort((x, y) => hoursByWorker.get(x) - hoursByWorker.get(y));
 
           for (const receiver of candidates) {
@@ -685,8 +940,15 @@
    * Validates constraints and builds detailed per-worker and global statistics
    * for any schedule (generated or manually edited).
    */
-  function validateAndSummarize({ calendar, workers, assignments }) {
+  function validateAndSummarize({
+    calendar,
+    workers,
+    assignments,
+    unavailability = {},
+    prevDayAssignments = null
+  }) {
     const activeWorkers = (workers || []).filter((w) => w && w.id && w.active !== false);
+    const unavailMap = normalizeUnavailability(unavailability);
     const workerStats = new Map();
 
     for (const w of activeWorkers) {
@@ -704,6 +966,19 @@
     let totalSlots = 0;
     let filledSlots = 0;
     const sameDayConflicts = [];
+    const unavailabilityConflicts = [];
+    const lateToEarlyTransitions = [];
+
+    const lastWorkedDay = new Map();
+    const lastWorkedSlot = new Map();
+    if (prevDayAssignments && typeof prevDayAssignments === 'object') {
+      for (const [slotKey, wId] of Object.entries(prevDayAssignments)) {
+        if (wId) {
+          lastWorkedDay.set(wId, 0);
+          lastWorkedSlot.set(wId, slotKey);
+        }
+      }
+    }
 
     for (const dayObj of calendar.days) {
       const seenToday = new Map();
@@ -720,6 +995,28 @@
           st.totalHours += slot.hours;
           st.bySlot[slot.slotKey]++;
           st.byWeek[dayObj.weekIndex]++;
+
+          const unavailDays = unavailMap.get(wId);
+          if (unavailDays && unavailDays.has(dayObj.day)) {
+            unavailabilityConflicts.push({
+              day: dayObj.day,
+              slotKey: slot.slotKey,
+              workerId: wId,
+              workerName: st.name
+            });
+          }
+
+          const prevD = lastWorkedDay.get(wId);
+          const prevS = lastWorkedSlot.get(wId);
+          if (prevD != null && dayObj.day - prevD === 1 && isLateSlot(prevS) && isEarlySlot(slot.slotKey)) {
+            lateToEarlyTransitions.push({
+              day: dayObj.day,
+              workerId: wId,
+              workerName: st.name
+            });
+          }
+          lastWorkedDay.set(wId, dayObj.day);
+          lastWorkedSlot.set(wId, slot.slotKey);
         }
 
         if (seenToday.has(wId)) {
@@ -736,12 +1033,12 @@
       }
     }
 
-    // Check weekly minimum (>= 1 shift per week for each worker)
+    // Check weekly minimum (>= 1 shift per week for each worker available at least 1 day in that week)
     const weeklyFailures = [];
     const partialWeekNotes = [];
 
     for (const week of calendar.weeks) {
-      if (week.totalSlots === 0) continue; // e.g., a week with only Sunday
+      if (week.totalSlots === 0) continue;
 
       if (week.totalSlots < activeWorkers.length) {
         partialWeekNotes.push(
@@ -751,6 +1048,12 @@
       }
 
       for (const st of workerStats.values()) {
+        const unavailDays = unavailMap.get(st.id);
+        const hasAvailableWorkDay = week.days.some(
+          (d) => d.slots.length > 0 && (!unavailDays || !unavailDays.has(d.day))
+        );
+        if (!hasAvailableWorkDay) continue;
+
         if (st.byWeek[week.weekIndex] === 0) {
           weeklyFailures.push({
             weekIndex: week.weekIndex,
@@ -769,6 +1072,11 @@
         `Rilevati ${sameDayConflicts.length} conflitti nello stesso giorno (un operaio ha più di un turno nello stesso giorno).`
       );
     }
+    if (unavailabilityConflicts.length > 0) {
+      warnings.push(
+        `Rilevate ${unavailabilityConflicts.length} assegnazioni in giorni segnati come ferie/indisponibilità (${unavailabilityConflicts.map((c) => `${c.workerName} giorno ${c.day}`).join(', ')}).`
+      );
+    }
     if (weeklyFailures.length > 0) {
       warnings.push(
         `${weeklyFailures.length} assegnazioni settimanali mancanti rispetto al minimo di 1 turno/settimana.`
@@ -777,6 +1085,11 @@
     if (filledSlots < totalSlots) {
       warnings.push(
         `${totalSlots - filledSlots} turni su ${totalSlots} risultano scoperti.`
+      );
+    }
+    if (lateToEarlyTransitions.length > 0) {
+      warnings.push(
+        `Attenzione: ${lateToEarlyTransitions.length} passaggi chiusura → apertura (${lateToEarlyTransitions.map((t) => `${t.workerName} giorno ${t.day}`).join(', ')}).`
       );
     }
 
@@ -789,10 +1102,17 @@
     const maxHours = hourCounts.length ? Math.max(...hourCounts) : 0;
 
     return {
-      valid: sameDayConflicts.length === 0 && weeklyFailures.length === 0 && filledSlots === totalSlots,
+      valid:
+        sameDayConflicts.length === 0 &&
+        unavailabilityConflicts.length === 0 &&
+        weeklyFailures.length === 0 &&
+        filledSlots === totalSlots,
       checks: {
         noSameDayDoubleShift: sameDayConflicts.length === 0,
         sameDayConflicts,
+        noUnavailabilityConflicts: unavailabilityConflicts.length === 0,
+        unavailabilityConflicts,
+        lateToEarlyTransitions,
         allWorkersWeeklyMin: weeklyFailures.length === 0,
         weeklyFailures,
         allSlotsFilled: filledSlots === totalSlots,
@@ -818,6 +1138,8 @@
     DAY_NAMES_SHORT_IT,
     DAY_NAMES_FULL_IT,
     SHIFT_DEFS,
+    getEasterSunday,
+    getItalianHolidaysForMonth,
     buildMonthCalendar,
     generateSchedule,
     validateAndSummarize

@@ -283,4 +283,125 @@ test('messaging helpers: phone normalization, shift extraction, mailto and Whats
     assignments: res.assignments
   });
   assert.ok(wa.startsWith('https://wa.me/393331234567?text='));
+
+  const ics = Messaging.buildWorkerIcs({
+    companyName: 'Officina Rossi',
+    calendar: res.calendar,
+    worker: workers[0],
+    assignments: res.assignments
+  });
+  assert.ok(ics.includes('BEGIN:VCALENDAR'));
+  assert.ok(ics.includes('BEGIN:VEVENT'));
+  assert.ok(ics.includes('DTSTART:202611'));
+  assert.ok(ics.includes('END:VCALENDAR'));
 });
+
+test('Italian holidays and custom holidays close days and appear in CSV/XLSX', () => {
+  // April 2026: Easter is April 5, Pasquetta is April 6, Liberazione is April 25
+  const aprHolidays = Scheduler.getItalianHolidaysForMonth(2026, 3);
+  assert.equal(aprHolidays.get(5), 'Pasqua');
+  assert.equal(aprHolidays.get(6), "Lunedì dell'Angelo (Pasquetta)");
+  assert.equal(aprHolidays.get(25), 'Festa della Liberazione');
+
+  const workers = makeWorkers(5);
+  const res = Scheduler.generateSchedule({
+    year: 2026,
+    month: 3, // Aprile 2026
+    workers,
+    calendarOptions: { useItalianHolidays: true, holidays: [10], openHolidays: [25] },
+    rng: mulberry32(88)
+  });
+
+  const day6 = res.calendar.days.find((d) => d.day === 6);
+  const day10 = res.calendar.days.find((d) => d.day === 10);
+  const day25 = res.calendar.days.find((d) => d.day === 25);
+  assert.equal(day6.isHoliday, true);
+  assert.equal(day6.slots.length, 0);
+  assert.equal(day10.isHoliday, true);
+  assert.equal(day10.slots.length, 0);
+  // Day 25 was reopened via openHolidays
+  assert.equal(day25.isHoliday, false);
+  assert.equal(day25.slots.length, 2); // Saturday
+
+  assert.equal(res.assignments['6:mf_1'], undefined);
+  assert.equal(res.assignments['10:mf_1'], undefined);
+  assert.equal(res.checks.allSlotsFilled, true);
+
+  const csv = Exporter.buildScheduleCsv({
+    calendar: res.calendar,
+    workers,
+    assignments: res.assignments
+  });
+  assert.ok(csv.includes('FESTA (Lunedì dell\'Angelo (Pasquetta))'));
+});
+
+test('worker unavailability is respected during generation and flagged on manual violation', () => {
+  const workers = makeWorkers(5);
+  const unavailability = {
+    w1: [2, 3, 4, 5],
+    w3: [10, 11]
+  };
+
+  const res = Scheduler.generateSchedule({
+    year: 2026,
+    month: 10, // Novembre 2026
+    workers,
+    unavailability,
+    rng: mulberry32(77)
+  });
+
+  assert.equal(res.checks.noUnavailabilityConflicts, true);
+  assert.equal(res.checks.allSlotsFilled, true);
+  assert.ok(res.stats.hoursDiff <= 2);
+
+  for (const day of [2, 3, 4, 5]) {
+    for (const slotKey of ['mf_1', 'mf_2', 'mf_3']) {
+      assert.notEqual(res.assignments[`${day}:${slotKey}`], 'w1');
+    }
+  }
+  for (const day of [10, 11]) {
+    for (const slotKey of ['mf_1', 'mf_2', 'mf_3']) {
+      assert.notEqual(res.assignments[`${day}:${slotKey}`], 'w3');
+    }
+  }
+
+  // Force a manual violation and verify validateAndSummarize catches it
+  const tampered = { ...res.assignments, '2:mf_1': 'w1' };
+  const check = Scheduler.validateAndSummarize({
+    calendar: res.calendar,
+    workers,
+    assignments: tampered,
+    unavailability
+  });
+  assert.equal(check.checks.noUnavailabilityConflicts, false);
+  assert.equal(check.checks.unavailabilityConflicts.length, 1);
+});
+
+test('cross-month continuity avoids late-to-early transition on day 1 and detects manual violation', () => {
+  const workers = makeWorkers(5);
+  // Suppose October 31, 2026 (Saturday) had w1 on sat_2 (13:00-20:00)
+  // December 2026 starts on Tuesday Dec 1, so Nov 30 (Monday) precedes Dec 1:
+  const res = Scheduler.generateSchedule({
+    year: 2026,
+    month: 11, // Dicembre 2026 (Dec 1 is Tuesday)
+    workers,
+    prevDayAssignments: { mf_3: 'w1', mf_2: 'w2', mf_1: 'w3' },
+    calendarOptions: { useItalianHolidays: true },
+    rng: mulberry32(42)
+  });
+
+  // w1 worked late shift (mf_3) on Nov 30, so should not be scheduled on early shift (mf_1) on Dec 1
+  assert.notEqual(res.assignments['1:mf_1'], 'w1');
+  assert.ok(res.stats.hoursDiff <= 2);
+
+  // Manual check: if w1 IS placed on 1:mf_1, lateToEarlyTransitions should detect it
+  const forced = { ...res.assignments, '1:mf_1': 'w1' };
+  const v = Scheduler.validateAndSummarize({
+    calendar: res.calendar,
+    workers,
+    assignments: forced,
+    prevDayAssignments: { mf_3: 'w1' }
+  });
+  assert.ok(v.checks.lateToEarlyTransitions.some((t) => t.day === 1 && t.workerId === 'w1'));
+});
+

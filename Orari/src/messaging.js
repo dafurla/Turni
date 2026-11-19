@@ -36,7 +36,8 @@
 
     for (const dayObj of calendar.days) {
       let assignedSlot = null;
-      if (!dayObj.isSunday) {
+      const isClosed = Boolean(dayObj.isClosed || dayObj.isSunday || dayObj.isHoliday);
+      if (!isClosed) {
         for (const slot of dayObj.slots) {
           const key = `${dayObj.day}:${slot.slotKey}`;
           if (assignments[key] === worker.id) {
@@ -53,6 +54,9 @@
         dayNameFull: dayObj.dayNameFull,
         isSaturday: dayObj.isSaturday,
         isSunday: dayObj.isSunday,
+        isHoliday: Boolean(dayObj.isHoliday),
+        holidayName: dayObj.holidayName || null,
+        isClosed,
         slot: assignedSlot
       });
     }
@@ -90,7 +94,7 @@
 
     lines.push('');
     lines.push(`Totale turni nel mese: ${summary.totalShifts} (${summary.totalHours} ore complessive).`);
-    lines.push('Nota: Domenica festa (riposo).');
+    lines.push('Nota: Domenica e festività = riposo.');
     return lines.join('\n');
   }
 
@@ -121,11 +125,78 @@
     return `https://wa.me/${phone}?text=${encodeURIComponent(body)}`;
   }
 
+  function pad2(n) {
+    return String(n).padStart(2, '0');
+  }
+
+  function icsEscape(str) {
+    return String(str == null ? '' : str)
+      .replace(/\\/g, '\\\\')
+      .replace(/;/g, '\\;')
+      .replace(/,/g, '\\,')
+      .replace(/\r?\n/g, '\\n');
+  }
+
+  function parseSlotTimes(slotKey) {
+    switch (slotKey) {
+      case 'mf_1': return ['060000', '080000'];
+      case 'mf_2': return ['140000', '160000'];
+      case 'mf_3': return ['160000', '200000'];
+      case 'sat_1': return ['060000', '130000'];
+      case 'sat_2': return ['130000', '200000'];
+      default: return ['080000', '120000'];
+    }
+  }
+
+  /**
+   * Generates an RFC 5545 .ics calendar file for a single employee's monthly shifts.
+   */
+  function buildWorkerIcs({ companyName, calendar, worker, assignments }) {
+    const summary = extractWorkerShiftsForMonth({ calendar, worker, assignments });
+    const now = new Date();
+    const dtStamp =
+      `${now.getUTCFullYear()}${pad2(now.getUTCMonth() + 1)}${pad2(now.getUTCDate())}T` +
+      `${pad2(now.getUTCHours())}${pad2(now.getUTCMinutes())}${pad2(now.getUTCSeconds())}Z`;
+
+    const companyLabel = companyName && companyName.trim() ? companyName.trim() : 'Azienda';
+    const lines = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//Generatore Orario Turni//IT',
+      'CALSCALE:GREGORIAN',
+      'METHOD:PUBLISH',
+      `X-WR-CALNAME:${icsEscape(`Turni ${worker.name} - ${calendar.monthName} ${calendar.year}`)}`
+    ];
+
+    const y = calendar.year;
+    const m = pad2(calendar.month + 1);
+
+    for (const item of summary.workingDays) {
+      const d = pad2(item.day);
+      const [startT, endT] = parseSlotTimes(item.slot.slotKey);
+      const uid = `turno-${y}${m}${d}-${item.slot.slotKey}-${String(worker.id).replace(/[^a-zA-Z0-9_-]/g, '')}@orari-turni`;
+      lines.push('BEGIN:VEVENT');
+      lines.push(`UID:${uid}`);
+      lines.push(`DTSTAMP:${dtStamp}`);
+      lines.push(`DTSTART:${y}${m}${d}T${startT}`);
+      lines.push(`DTEND:${y}${m}${d}T${endT}`);
+      lines.push(`SUMMARY:${icsEscape(`Turno ${item.slot.label} (${companyLabel})`)}`);
+      lines.push(
+        `DESCRIPTION:${icsEscape(`Operaio: ${worker.name}\\nFascia: ${item.slot.label} (${item.slot.hours}h)\\nAzienda: ${companyLabel}`)}`
+      );
+      lines.push('END:VEVENT');
+    }
+
+    lines.push('END:VCALENDAR');
+    return lines.join('\r\n') + '\r\n';
+  }
+
   return {
     normalizeWhatsAppNumber,
     extractWorkerShiftsForMonth,
     formatWorkerScheduleText,
     buildMailtoUrl,
-    buildWhatsAppUrl
+    buildWhatsAppUrl,
+    buildWorkerIcs
   };
 }));

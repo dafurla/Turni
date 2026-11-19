@@ -41,8 +41,11 @@
 
     for (const dayObj of calendar.days) {
       const label = `${dayObj.day} (${dayObj.dayNameShort})`;
-      if (dayObj.isSunday) {
-        lines.push([label, 'FESTA (Domenica)', '', ''].map(csvEscape).join(';'));
+      if (dayObj.isSunday || dayObj.isHoliday || dayObj.isClosed) {
+        const reason = dayObj.isHoliday
+          ? `FESTA (${dayObj.holidayName || 'Festivo'})`
+          : 'FESTA (Domenica)';
+        lines.push([label, reason, '', ''].map(csvEscape).join(';'));
       } else if (dayObj.isSaturday) {
         const w1 = workerMap.get(assignments[`${dayObj.day}:sat_1`]) || '';
         const w2 = workerMap.get(assignments[`${dayObj.day}:sat_2`]) || '';
@@ -324,12 +327,15 @@
 
     for (const dayObj of calendar.days) {
       const label = `${dayObj.day} (${dayObj.dayNameShort})`;
-      if (dayObj.isSunday) {
+      if (dayObj.isSunday || dayObj.isHoliday || dayObj.isClosed) {
+        const reason = dayObj.isHoliday
+          ? `FESTA (${dayObj.holidayName || 'Festivo'})`
+          : 'FESTA (Domenica)';
         sheet1Rows.push({
           height: 20,
           cells: [
             { value: label, style: 5 },
-            { value: 'FESTA (Domenica)', style: 5 },
+            { value: reason, style: 5 },
             { value: 'Riposo', style: 5 },
             { value: 'Riposo', style: 5 }
           ]
