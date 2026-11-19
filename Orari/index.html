@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Generatore Orario Turni Operai</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="mode-desktop">
+  <header class="topbar">
+    <div class="topbar-brand">
+      <div class="brand-icon" aria-hidden="true">📅</div>
+      <div>
+        <h1>Generatore Orario Turni</h1>
+        <p class="subtitle">Lun–Ven: 3 turni (06-08, 14-16, 16-20) · Sabato: 2 turni (06-13, 13-20) · Domenica: Festa</p>
+      </div>
+    </div>
+
+    <div class="topbar-actions">
+      <div class="view-mode-switch" role="group" aria-label="Modalità visualizzazione">
+        <button id="btnModeDesktop" class="view-mode-btn active" type="button" title="Visualizzazione ottimizzata per Desktop">
+          🖥️ Desktop
+        </button>
+        <button id="btnModeMobile" class="view-mode-btn" type="button" title="Visualizzazione ottimizzata per Smartphone">
+          📱 Smartphone
+        </button>
+      </div>
+
+      <div class="period-picker">
+        <label for="monthSelect">Mese</label>
+        <select id="monthSelect"></select>
+        <label for="yearSelect">Anno</label>
+        <select id="yearSelect"></select>
+      </div>
+
+      <button id="generateBtn" class="btn btn-primary" type="button">
+        🎲 Genera Orario
+      </button>
+      <button id="exportXlsxBtn" class="btn btn-secondary" type="button">
+        📊 Excel (.xlsx)
+      </button>
+      <button id="exportCsvBtn" class="btn btn-ghost desktop-only-btn" type="button">
+        📄 CSV
+      </button>
+    </div>
+  </header>
+
+  <nav class="tabs-nav" aria-label="Sezioni applicazione">
+    <div class="tabs-inner">
+      <button class="tab-btn" data-tab="create" type="button">
+        <span class="tab-ico">✨</span>
+        <span class="tab-lbl">Crea turni</span>
+      </button>
+      <button class="tab-btn active" data-tab="schedule" type="button">
+        <span class="tab-ico">📅</span>
+        <span class="tab-lbl">Orario Mensile</span>
+      </button>
+      <button class="tab-btn" data-tab="company" type="button">
+        <span class="tab-ico">👷</span>
+        <span class="tab-lbl">Operai (<span id="companyTotalBadge">0</span>)</span>
+      </button>
+      <button class="tab-btn" data-tab="print-send" type="button">
+        <span class="tab-ico">🖨️</span>
+        <span class="tab-lbl">Stampa &amp; Invia</span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- TAB 0: CREA TURNI -->
+  <section id="tab-create" class="tab-panel single-container hidden">
+    <section class="card create-wizard-card">
+      <div class="card-header">
+        <div>
+          <h2>✨ Crea Turni Mensili in Automatico</h2>
+          <p class="card-sub">
+            Scegli il mese e l'anno dai menù a tendina, seleziona gli operai disponibili e genera tutti i turni del mese.
+          </p>
+        </div>
+      </div>
+
+      <div class="create-grid">
+        <div class="create-step-box">
+          <h3>1. Periodo di riferimento</h3>
+          <div class="create-period-row">
+            <div class="field-group">
+              <label for="createMonthSelect">Mese</label>
+              <select id="createMonthSelect"></select>
+            </div>
+            <div class="field-group">
+              <label for="createYearSelect">Anno</label>
+              <select id="createYearSelect"></select>
+            </div>
+          </div>
+          <div id="createCalendarInfo" class="create-calendar-info"></div>
+
+          <div class="divider"></div>
+          <h3>3. Opzioni di generazione</h3>
+          <label class="checkbox-row">
+            <input id="createAvoidSameShiftOpt" type="checkbox" checked />
+            <span>Evita stessa fascia in giorni consecutivi</span>
+          </label>
+          <label class="checkbox-row">
+            <input id="createAvoidLateToEarlyOpt" type="checkbox" checked />
+            <span>Evita chiusura → apertura (16-20 → 06-08)</span>
+          </label>
+          <label class="checkbox-row">
+            <input id="createResetLocksOpt" type="checkbox" />
+            <span>Ignora eventuali turni bloccati (rigenera tutto il mese)</span>
+          </label>
+        </div>
+
+        <div class="create-step-box">
+          <div class="create-workers-header">
+            <div>
+              <h3>2. Operai disponibili per il mese (<span id="createSelectedCount">0</span>/<span id="createTotalCount">0</span>)</h3>
+              <p class="card-sub">Spunta gli operai da inserire nei turni del mese selezionato.</p>
+            </div>
+            <div class="header-mini-actions">
+              <button id="createSelectAllBtn" class="btn btn-ghost btn-xs" type="button">Seleziona tutti</button>
+              <button id="createSelectNoneBtn" class="btn btn-ghost btn-xs" type="button">Deseleziona</button>
+            </div>
+          </div>
+
+          <div id="createWorkerCheckboxes" class="create-worker-checklist"></div>
+
+          <div class="create-quick-link">
+            <button id="createGoCompanyBtn" class="link-btn" type="button">
+              + Aggiungi o modifica operai nell'anagrafica azienda →
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="create-submit-bar">
+        <button id="createGenerateAllBtn" class="btn btn-primary btn-lg" type="button">
+          🎲 Genera in automatico tutti i turni del mese
+        </button>
+      </div>
+    </section>
+  </section>
+
+  <!-- TAB 1: ORARIO MENSILE -->
+  <main id="tab-schedule" class="tab-panel layout">
+    <aside class="sidebar">
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2>Operai attivi (<span id="activeWorkerCount">0</span>)</h2>
+            <p class="card-sub" id="sidebarCompanyLabel"></p>
+          </div>
+          <div class="header-mini-actions">
+            <button id="openCompanyTabBtn" class="link-btn" type="button">Anagrafica →</button>
+          </div>
+        </div>
+
+        <form id="addWorkerForm" class="add-worker-form">
+          <input
+            id="workerNameInput"
+            type="text"
+            placeholder="Aggiungi rapido (es. Rossi Mario)"
+            autocomplete="off"
+          />
+          <button class="btn btn-primary btn-sm" type="submit">+</button>
+        </form>
+
+        <div class="quick-gen-row">
+          <label for="quickCountInput">Crea X operai test:</label>
+          <div class="quick-gen-controls">
+            <input id="quickCountInput" type="number" min="3" max="30" value="5" />
+            <button id="quickGenBtn" class="btn btn-ghost btn-sm" type="button">Crea X</button>
+          </div>
+        </div>
+
+        <div id="workerList" class="worker-list"></div>
+        <p class="hint">
+          Spunta = considerato per i turni. Clicca il nome per evidenziare i turni, ✏️ per modificare, × per eliminare.
+        </p>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2>Regole &amp; Modello</h2>
+        </div>
+
+        <label class="checkbox-row">
+          <input id="avoidSameShiftOpt" type="checkbox" checked />
+          <span>Evita stessa fascia in giorni consecutivi</span>
+        </label>
+
+        <label class="checkbox-row">
+          <input id="avoidLateToEarlyOpt" type="checkbox" checked />
+          <span>Evita chiusura → apertura (16-20 → 06-08)</span>
+        </label>
+
+        <div class="divider"></div>
+
+        <div class="import-row">
+          <label class="btn btn-ghost btn-sm file-label">
+            📥 Importa CSV modello
+            <input id="importCsvInput" type="file" accept=".csv,.txt" hidden />
+          </label>
+          <button id="clearLocksBtn" class="btn btn-ghost btn-sm" type="button">🔓 Sblocca tutto</button>
+        </div>
+      </section>
+    </aside>
+
+    <section class="content">
+      <div id="statusBar" class="status-bar"></div>
+      <div id="warningsBox" class="warnings-box hidden"></div>
+
+      <section class="card table-card">
+        <div class="card-header">
+          <div>
+            <h2 id="scheduleTitle">Orario mese: Novembre 2026</h2>
+            <p class="card-sub">
+              Modifica manualmente qualsiasi turno dal menu a tendina (mostra gli operai disponibili) o clicca 🔒 per fissarlo.
+            </p>
+          </div>
+          <div class="header-mini-actions">
+            <button id="openCreateTabBtn" class="btn btn-ghost btn-sm" type="button">✨ Crea turni</button>
+            <div id="highlightBanner" class="highlight-banner hidden">
+              <span>Evidenziato: <strong id="highlightName"></strong></span>
+              <button id="clearHighlightBtn" class="link-btn" type="button">Mostra tutti</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Desktop Table View -->
+        <div class="table-wrap desktop-schedule-wrap">
+          <table class="schedule-table" id="scheduleTable">
+            <thead>
+              <tr>
+                <th class="col-day">Giorno</th>
+                <th>
+                  <div class="th-title">Fascia 1</div>
+                  <div class="th-sub">Lun–Ven 06:00 / 08:00 · Sab 06:00 / 13:00</div>
+                </th>
+                <th>
+                  <div class="th-title">Fascia 2</div>
+                  <div class="th-sub">Lun–Ven 14:00 / 16:00 · Sab 13:00 / 20:00</div>
+                </th>
+                <th>
+                  <div class="th-title">Fascia 3</div>
+                  <div class="th-sub">Lun–Ven 16:00 / 20:00 · Sabato chiuso</div>
+                </th>
+              </tr>
+            </thead>
+            <tbody id="scheduleBody"></tbody>
+          </table>
+        </div>
+
+        <!-- Smartphone Card View -->
+        <div id="mobileScheduleCards" class="mobile-schedule-cards"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2>Riepilogo &amp; Equità Operai</h2>
+            <p class="card-sub">Conteggio turni settimanali, ore mensili e distribuzione tra le fasce orarie</p>
+          </div>
+        </div>
+        <div class="table-wrap desktop-summary-wrap">
+          <table class="summary-table" id="summaryTable">
+            <thead id="summaryHead"></thead>
+            <tbody id="summaryBody"></tbody>
+          </table>
+        </div>
+        <div id="mobileSummaryCards" class="mobile-summary-cards"></div>
+      </section>
+    </section>
+  </main>
+
+  <!-- TAB 2: LISTA OPERAI AZIENDA -->
+  <section id="tab-company" class="tab-panel single-container hidden">
+    <section class="card">
+      <div class="card-header">
+        <div>
+          <h2>Impostazioni Azienda &amp; Anagrafica Operai</h2>
+          <p class="card-sub">
+            Crea e salva la lista dei dipendenti dell'azienda con email e numero WhatsApp per generare, stampare e inviare i turni mensili.
+          </p>
+        </div>
+        <div class="header-mini-actions">
+          <button id="toggleBulkBtn" class="btn btn-ghost btn-sm" type="button">📋 Incolla lista nomi</button>
+          <button id="resetDemoBtn" class="btn btn-ghost btn-sm" type="button">Ripristina predefiniti</button>
+          <button id="clearWorkersBtn" class="btn btn-ghost btn-sm" type="button">Svuota lista</button>
+        </div>
+      </div>
+
+      <div class="company-settings-row">
+        <div class="field-group">
+          <label for="companyNameInput">Nome Azienda (comparirà nelle stampe e nei messaggi)</label>
+          <input id="companyNameInput" type="text" placeholder="Es. Officina Rossi S.r.l." />
+        </div>
+      </div>
+
+      <form id="companyAddForm" class="company-add-grid">
+        <div class="field-group">
+          <label for="newWorkerName">Nome e Cognome *</label>
+          <input id="newWorkerName" type="text" required placeholder="Es. Mario Rossi" />
+        </div>
+        <div class="field-group">
+          <label for="newWorkerRole">Ruolo / Reparto</label>
+          <input id="newWorkerRole" type="text" placeholder="Es. Operaio specializzato" />
+        </div>
+        <div class="field-group">
+          <label for="newWorkerEmail">Email</label>
+          <input id="newWorkerEmail" type="email" placeholder="mario.rossi@azienda.it" />
+        </div>
+        <div class="field-group">
+          <label for="newWorkerPhone">WhatsApp / Telefono</label>
+          <input id="newWorkerPhone" type="tel" placeholder="+39 333 1234567" />
+        </div>
+        <div class="field-action">
+          <button class="btn btn-primary" type="submit">+ Aggiungi Operaio</button>
+        </div>
+      </form>
+
+      <div id="bulkPanel" class="bulk-panel hidden">
+        <label for="bulkTextarea">Incolla più nomi (uno per riga o separati da virgola; puoi anche usare "Nome;Email;Telefono"):</label>
+        <textarea id="bulkTextarea" rows="4" placeholder="Mario Rossi;mario@azienda.it;3331234567&#10;Luca Bianchi;luca@azienda.it;3397654321&#10;Anna Verdi"></textarea>
+        <div class="bulk-actions">
+          <button id="bulkReplaceBtn" class="btn btn-secondary btn-sm" type="button">Sostituisci lista azienda</button>
+          <button id="bulkAppendBtn" class="btn btn-ghost btn-sm" type="button">Aggiungi alla lista</button>
+        </div>
+      </div>
+
+      <div class="table-wrap desktop-company-wrap">
+        <table class="company-table">
+          <thead>
+            <tr>
+              <th style="width: 56px;">Attivo</th>
+              <th>Nome e Cognome</th>
+              <th>Ruolo / Reparto</th>
+              <th>Email</th>
+              <th>WhatsApp / Telefono</th>
+              <th class="num" style="width: 90px;">Turni mese</th>
+              <th style="width: 190px;">Azioni</th>
+            </tr>
+          </thead>
+          <tbody id="companyTableBody"></tbody>
+        </table>
+      </div>
+
+      <div id="mobileCompanyCards" class="mobile-company-cards"></div>
+    </section>
+  </section>
+
+  <!-- TAB 3: STAMPA & INVIA TURNI -->
+  <section id="tab-print-send" class="tab-panel single-container hidden">
+    <div class="print-send-grid">
+      <!-- Left: Stampa Turni -->
+      <section class="card print-controls-card">
+        <div class="card-header">
+          <div>
+            <h2>🖨️ Stampa Turni Mensili</h2>
+            <p class="card-sub">Scegli se stampare il prospetto completo aziendale o la scheda individuale di un operaio.</p>
+          </div>
+          <button id="executePrintBtn" class="btn btn-primary" type="button">🖨️ Stampa / Salva PDF</button>
+        </div>
+
+        <div class="print-mode-switcher">
+          <label class="mode-card" id="modeCompanyCard">
+            <input type="radio" name="printMode" value="company" checked />
+            <div>
+              <strong>Stampa Turni Azienda</strong>
+              <span>Tabella mensile completa con tutti i turni di tutti gli operai.</span>
+            </div>
+          </label>
+          <label class="mode-card" id="modeWorkerCard">
+            <input type="radio" name="printMode" value="worker" />
+            <div>
+              <strong>Stampa Turni Operaio</strong>
+              <span>Scheda mensile individuale con tutti i turni del singolo lavoratore.</span>
+            </div>
+          </label>
+        </div>
+
+        <div id="workerPrintOptions" class="worker-print-options hidden">
+          <div class="field-group">
+            <label for="printWorkerSelect">Seleziona operaio da stampare:</label>
+            <select id="printWorkerSelect"></select>
+          </div>
+          <label class="checkbox-row" style="margin-top: 8px;">
+            <input id="printIncludeAllDaysOpt" type="checkbox" checked />
+            <span>Mostra calendario completo del mese (inclusi giorni di riposo e domenica festa)</span>
+          </label>
+        </div>
+
+        <div class="divider"></div>
+        <h3 class="preview-label">Anteprima di stampa</h3>
+        <div id="printSheet" class="print-sheet"></div>
+      </section>
+
+      <!-- Right: Invia Turno via Email o WhatsApp -->
+      <section class="card send-panel-card">
+        <div class="card-header">
+          <div>
+            <h2>📤 Invia Turno al Dipendente</h2>
+            <p class="card-sub">Invia i turni del mese selezionato tramite Email o WhatsApp.</p>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label for="sendWorkerSelect">Dipendente destinatario</label>
+          <select id="sendWorkerSelect"></select>
+        </div>
+
+        <div class="send-contacts-grid">
+          <div class="field-group">
+            <label for="sendEmailInput">Email dipendente</label>
+            <input id="sendEmailInput" type="email" placeholder="nome@azienda.it" />
+          </div>
+          <div class="field-group">
+            <label for="sendPhoneInput">Numero WhatsApp</label>
+            <input id="sendPhoneInput" type="tel" placeholder="+39 333 1234567" />
+          </div>
+        </div>
+
+        <div class="field-group" style="margin-top: 10px;">
+          <div class="msg-label-row">
+            <label for="sendMessageTextarea">Messaggio riepilogo turni del mese</label>
+            <button id="resetMessageBtn" class="link-btn" type="button">Rigenera testo</button>
+          </div>
+          <textarea id="sendMessageTextarea" rows="11"></textarea>
+        </div>
+
+        <div class="send-actions">
+          <button id="sendEmailBtn" class="btn btn-primary" type="button">✉️ Invia via Email</button>
+          <button id="sendWhatsAppBtn" class="btn btn-secondary" type="button">💬 Invia via WhatsApp</button>
+          <button id="copyMessageBtn" class="btn btn-ghost" type="button">📋 Copia testo</button>
+        </div>
+
+        <div class="divider"></div>
+        <h3 class="preview-label">Stato invio mensile dipendenti</h3>
+        <div id="sendRosterStatus" class="send-roster-status"></div>
+      </section>
+    </div>
+  </section>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script defer src="src/scheduler.js"></script>
+  <script defer src="src/xlsx.js"></script>
+  <script defer src="src/messaging.js"></script>
+  <script defer src="src/app.js"></script>
+</body>
+</html>
